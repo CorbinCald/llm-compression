@@ -39,7 +39,7 @@ Core objective:
 - Primary metric: minimize raw-decompression failure_units before any repair. failure_units use granular failed test counts when verification output exposes them, and fallback command-level units for failed setup/lint/build/test commands otherwise.
 - Secondary metric: lower artifact_bytes/original_bytes is better.
 - Prefer the most compressed verified strategy; do not mark LLM-eligible source files lossless.
-- Diagnostic repair may run after failure, but repaired candidates are not accepted; use repair diagnostics to improve the next fresh decompression.
+- Diagnostic repair may run after failure, but repaired candidates are not accepted. When history contains repair_diagnostics, treat changed paths, notes, and repaired verification as clues about what information the next raw compression/decompression must preserve. Never describe repaired verification as success.
 
 You may adjust all experiment variables:
 - model: choose one allowed OpenRouter model.

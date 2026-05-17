@@ -209,7 +209,7 @@ Global state is written to and automatically reloaded from:
 .llm-compress/benchmark-global-research.json
 ```
 
-This makes benchmark lessons persist across separate `llm-compress autoresearch --benchmarks` invocations. A later benchmark run seeds the global strategy and per-repo researcher context with the previous run's lessons and recent repo history.
+This makes benchmark lessons persist across separate `llm-compress autoresearch --benchmarks` invocations. A later benchmark run seeds the global strategy and per-repo researcher context with the previous run's lessons and recent repo history. Global lessons are constrained to language-level or tool-level patterns; exact repo names, package names, file paths, and file names are filtered out so one repo's local fix does not leak into another.
 
 Path-specific source-file `lossless_overrides` are disabled. Global learning carries general lessons via prompts, model choice, format variant, chunking, candidate count, repair behavior, size thresholds, temperature, and optional temporary tool-code patches.
 

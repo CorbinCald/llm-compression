@@ -39,6 +39,22 @@ class ToolPatchTests(unittest.TestCase):
             apply_code_patch(root, patch)
             self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
 
+    def test_apply_code_patch_accepts_relative_repo_root(self):
+        with TemporaryDirectory(dir=Path.cwd()) as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            target = root / "src" / "x.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            patch = """diff --git a/src/x.py b/src/x.py
+--- a/src/x.py
++++ b/src/x.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 2
+"""
+            apply_code_patch(root.relative_to(Path.cwd()), patch)
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+
 
 if __name__ == "__main__":
     unittest.main()

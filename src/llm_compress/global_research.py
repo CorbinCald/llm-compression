@@ -20,13 +20,16 @@ Goal:
 - Primary metric: minimize raw-decompression failure_units before repair. failure_units use granular failed test counts when verification output exposes them, and fallback command-level units for failed setup/lint/build/test commands otherwise.
 - Secondary metric: lower artifact_bytes/original_bytes is better.
 - Prefer lessons that generalize across languages/repos; source-file lossless overrides are banned.
+- Lessons must be language-level or tool-level, not repo-specific. Do not store exact repo names, package names, file paths, or file names in lessons.
+- Translate specific evidence into general patterns. Good: "Go files must preserve package declarations." Bad: "mux.go must start with package mux."
 
 You may update the global seed experiment plan for the next repo. This seed plan can tune:
 model, compression/decompression prompt addenda, format variant, chunking strategy, chunk size,
 candidate count, diagnostic repair enablement, max LLM bytes, temperature, and optional temporary code_patch.
-Repair is diagnostic only: repaired candidates are not accepted as benchmark success, but their paths,
-notes, and reverification results can guide future seed plans. max LLM bytes may be raised above the
-user default, but not lowered to avoid hard files.
+Repair is diagnostic only: repaired candidates are not accepted as benchmark success. If repair diagnostics
+show changed paths or a repaired verification pass, treat that only as evidence of what the next raw
+compression/decompression must encode better. max LLM bytes may be raised above the user default, but
+not lowered to avoid hard files.
 
 Return only JSON with this schema:
 {
@@ -187,11 +190,12 @@ class GlobalResearchAgent:
         latest = history[-1]
         previous_plan = _latest_plan(history) or previous_state.seed_plan
         lessons = list(previous_state.lessons)
-        repo_name = str(latest.get("repo", {}).get("name", "repo"))
+        repo = latest.get("repo", {})
+        language = str(repo.get("language") or "benchmark") if isinstance(repo, dict) else "benchmark"
         if latest.get("success"):
             ratio = latest.get("ratio")
             lessons.append(
-                f"{repo_name} passed with {previous_plan.format_variant}/{previous_plan.chunking_strategy}; ratio={ratio}. Prefer this unless later repos fail."
+                f"A recent {language} run passed raw verification with {previous_plan.format_variant}/{previous_plan.chunking_strategy}; ratio={ratio}. Prefer this only while later runs improve."
             )
             seed = ResearchPlan.from_json(
                 previous_plan.to_json(),
@@ -201,13 +205,13 @@ class GlobalResearchAgent:
                 default_max_llm_bytes=default_max_llm_bytes,
             )
             seed.lossless_overrides = []
-            seed.hypothesis = f"carry forward successful global strategy from {repo_name}"
+            seed.hypothesis = "carry forward recent successful global strategy"
         else:
             lessons.append(
-                f"{repo_name} failed; strengthen recoverability globally before later repos."
+                f"A recent {language} run failed raw verification; strengthen generally recoverable component detail before later runs."
             )
             seed = ResearchPlan(
-                hypothesis=f"after {repo_name} failure: use testsafe/literal-heavy chunked compression with diagnostic repair",
+                hypothesis="after recent failure: use testsafe/literal-heavy chunked compression with diagnostic repair",
                 model=_next_model(previous_plan.model, self.allowed_models),
                 compression_prompt_extra=(
                     previous_plan.compression_prompt_extra + "\nPreserve exact public APIs, literals, exceptions, import/export names, "
@@ -258,8 +262,9 @@ def _state_from_json(
     lessons: list[str] = []
     if isinstance(raw_lessons, list):
         for item in raw_lessons:
-            if isinstance(item, str) and item.strip():
-                lessons.append(item.strip()[:500])
+            lesson = _generic_global_lesson(item)
+            if lesson:
+                lessons.append(lesson)
     seed_data = data.get("seed_plan", {})
     if not isinstance(seed_data, dict):
         seed_data = {}
@@ -278,6 +283,23 @@ def _state_from_json(
         lessons=_dedupe_tail(lessons, 20),
         seed_plan=seed,
     )
+
+
+def _generic_global_lesson(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lesson = " ".join(value.strip().split())[:500]
+    if not lesson:
+        return None
+    lowered = lesson.lower()
+    repo_terms = {"nanoid", "itsdangerous", "mux", "itoa", "click", "express", "lodash"}
+    if any(re.search(rf"(?<![a-z0-9_-]){re.escape(term)}(?![a-z0-9_-])", lowered) for term in repo_terms):
+        return None
+    if re.search(r"(?:^|[\s'\"])(?:\.?/?[\w.-]+/)+[\w.-]+", lesson):
+        return None
+    if re.search(r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|go|rs|c|h|css|html|json|toml|yaml|yml|md|sh)\b", lowered):
+        return None
+    return lesson
 
 
 def load_global_research_file(

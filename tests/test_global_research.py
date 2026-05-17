@@ -54,7 +54,40 @@ class GlobalResearchTests(unittest.TestCase):
             default_max_llm_bytes=20_000,
         )
         self.assertEqual(state.seed_plan.lossless_overrides, [])
-        self.assertTrue(any("unit" in lesson for lesson in state.lessons))
+        self.assertFalse(any("unit" in lesson for lesson in state.lessons))
+        self.assertTrue(any("raw verification" in lesson for lesson in state.lessons))
+
+    def test_load_global_research_file_drops_repo_specific_lessons(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "benchmark-global-research.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state": {
+                            "reason": "prior run",
+                            "lessons": [
+                                "Go files must preserve package declarations.",
+                                "click shell_completion.py needs string forward refs.",
+                                "express lib/response.js must delete opts.maxAge.",
+                            ],
+                            "seed_plan": ResearchPlan(model="openrouter/auto").to_json(),
+                        },
+                        "history": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_global_research_file(
+                path,
+                allowed_models=["openrouter/auto"],
+                max_candidates=3,
+                default_max_llm_bytes=20_000,
+            )
+
+        self.assertIsNotNone(loaded)
+        state, _ = loaded
+        self.assertEqual(state.lessons, ["Go files must preserve package declarations."])
 
     def test_load_global_research_file_restores_state_and_history(self):
         with TemporaryDirectory() as temp:

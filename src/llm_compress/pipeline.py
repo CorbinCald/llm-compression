@@ -403,14 +403,14 @@ def _run_iteration_with_code_patch(
         apply_code_patch(patched_tool_dir, research_plan.code_patch)
         detail("patched tool", patched_tool_dir)
 
-        config_path = iteration_dir / "code-patch-runner-input.json"
-        output_json = iteration_dir / "code-patch-runner-output.json"
+        config_path = (iteration_dir / "code-patch-runner-input.json").resolve()
+        output_json = (iteration_dir / "code-patch-runner-output.json").resolve()
         _write_json(
             config_path,
             {
-                "source_root": str(prepared.source_root),
-                "artifact_path": str(artifact_path),
-                "iteration_dir": str(iteration_dir),
+                "source_root": str(prepared.source_root.resolve()),
+                "artifact_path": str(artifact_path.resolve()),
+                "iteration_dir": str(iteration_dir.resolve()),
                 "target_label": prepared.target,
                 "workers": options.workers,
                 "research_plan": research_plan.to_json(),

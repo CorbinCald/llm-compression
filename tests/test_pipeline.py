@@ -13,9 +13,11 @@ from llm_compress.pipeline import (
     RunOptions,
     _evaluate_candidate,
     _history_entry,
+    _run_iteration_with_code_patch,
 )
 from llm_compress.repair import RepairSummary
 from llm_compress.research import ResearchPlan
+from llm_compress.targets import PreparedTarget
 from llm_compress.verify import CommandResult, VerificationCommand, VerificationPlan, VerificationReport
 
 
@@ -71,6 +73,91 @@ def _compression_summary(root: Path) -> CompressionSummary:
 
 
 class PipelineRepairTests(unittest.TestCase):
+    def test_code_patch_runner_receives_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            (source / "a.py").write_text("print('ok')\n", encoding="utf-8")
+            iteration_dir = root / "iter-0"
+            artifact_path = iteration_dir / "compressed.jsonl"
+            patched_tool = root / "patched-tool"
+            patched_tool.mkdir()
+
+            def fake_run(args, **kwargs):
+                config_path = Path(args[-1])
+                self.assertTrue(config_path.is_absolute())
+                config = __import__("json").loads(config_path.read_text(encoding="utf-8"))
+                for key in ("source_root", "artifact_path", "iteration_dir", "output_json"):
+                    self.assertTrue(Path(config[key]).is_absolute(), key)
+                output_json = Path(config["output_json"])
+                output_json.write_text(
+                    __import__("json").dumps(
+                        {
+                            "compression": {
+                                "artifact_path": config["artifact_path"],
+                                "original_bytes": 1,
+                                "artifact_bytes": 1,
+                                "file_count": 0,
+                                "llm_file_count": 0,
+                                "lossless_file_count": 0,
+                                "llm_paths": [],
+                                "fallback_paths": [],
+                                "errors": {},
+                                "chunking_strategy": "file",
+                                "format_variant": "component_v1",
+                            },
+                            "decompressions": [
+                                {
+                                    "index": 0,
+                                    "restore_dir": str(root / "candidate-0"),
+                                    "decompression": {
+                                        "artifact_path": config["artifact_path"],
+                                        "output_dir": str(root / "candidate-0"),
+                                        "file_count": 0,
+                                        "llm_file_count": 0,
+                                        "lossless_file_count": 0,
+                                        "hash_matches": 0,
+                                        "hash_mismatches": [],
+                                        "errors": {},
+                                    },
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                class Completed:
+                    returncode = 0
+                    stdout = ""
+
+                return Completed()
+
+            prepared = PreparedTarget(
+                target="unit",
+                label="unit",
+                source_root=source,
+                run_dir=root,
+                cloned=False,
+            )
+            with (
+                patch("llm_compress.pipeline.copy_tool_repo", return_value=patched_tool),
+                patch("llm_compress.pipeline.apply_code_patch"),
+                patch("llm_compress.pipeline.subprocess.run", side_effect=fake_run),
+                redirect_stdout(io.StringIO()),
+            ):
+                compression, decompressions = _run_iteration_with_code_patch(
+                    prepared=prepared,
+                    iteration_dir=iteration_dir,
+                    artifact_path=artifact_path,
+                    research_plan=ResearchPlan(code_patch="diff --git a/x b/x"),
+                    options=RunOptions(),
+                )
+
+        self.assertEqual(compression.artifact_path, artifact_path.resolve())
+        self.assertEqual(len(decompressions), 1)
+
     def test_repaired_candidate_is_diagnostic_not_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

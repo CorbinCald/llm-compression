@@ -11,7 +11,7 @@ You may also propose temporary changes to the llm-compression tool codebase itse
 Primary loss: minimize raw-decompression `failure_units`, using granular failed test counts when verification output exposes them and fallback units for failed setup/lint/build/test commands otherwise.
 Secondary loss: `artifact_bytes / original_bytes`.
 
-A candidate is accepted only when the raw decompressed restored repo verifies successfully before any repair. Diagnostic repair may patch and reverify a failed candidate, but that repaired tree is feedback for the next experiment, not success. If multiple raw candidates pass, prefer the one produced by the more compressed artifact. Do not mark LLM-eligible source files for exact preservation.
+A candidate is accepted only when the raw decompressed restored repo verifies successfully before any repair. Diagnostic repair may patch and reverify a failed candidate, but that repaired tree is feedback for the next experiment, not success. Treat repair diagnostics as clues about what the next raw compression/decompression must encode better; never describe repaired verification as success. If multiple raw candidates pass, prefer the one produced by the more compressed artifact. Do not mark LLM-eligible source files for exact preservation.
 
 ## Variables you should actively tune
 
@@ -36,4 +36,4 @@ A candidate is accepted only when the raw decompressed restored repo verifies su
 5. Prefer `component_literal_heavy` for code with many exact messages/selectors/protocol strings.
 6. Prefer `component_contracts` for libraries with stable public APIs.
 7. Prefer `component_testsafe` after a failed verification run.
-8. In global benchmark mode, carry lessons that generalize across repos. Do not carry exact file paths from one repo into another; translate them into model/prompt/chunking/format/repair guidance.
+8. In global benchmark mode, carry only language-level or tool-level lessons. Do not carry exact repo names, package names, file paths, or file names into global lessons; translate them into model/prompt/chunking/format/repair guidance.

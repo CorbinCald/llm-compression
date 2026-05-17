@@ -101,6 +101,7 @@ def build_tool_repo_context(*, max_chars: int = 180_000, max_tree_entries: int =
 
 def copy_tool_repo(destination: Path) -> Path:
     root = tool_repo_root()
+    destination = destination.resolve()
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(root, destination, symlinks=True, ignore=_copy_ignore)
@@ -112,11 +113,15 @@ def apply_code_patch(repo_root: Path, patch_text: str) -> None:
     if not patch:
         return
     validate_code_patch(patch)
+    repo_root = repo_root.resolve()
     patch_path = repo_root / ".llm-compress-experiment.patch"
     patch_path.write_text(patch + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["GIT_CEILING_DIRECTORIES"] = str(repo_root.parent)
     completed = subprocess.run(
-        ["git", "apply", "--whitespace=nowarn", str(patch_path)],
+        ["git", "apply", "--whitespace=nowarn", patch_path.name],
         cwd=repo_root,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

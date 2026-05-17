@@ -79,7 +79,7 @@ def log_research_plan(plan: Any, *, title: str = "Experiment plan") -> None:
             ("format", plan.format_variant),
             ("chunking", chunking),
             ("candidates", plan.candidate_count),
-            ("repair", yes_no(plan.repair_enabled)),
+            ("diagnostic repair", yes_no(plan.repair_enabled)),
             ("max LLM bytes", format_bytes(plan.max_llm_bytes)),
             ("temperature", plan.temperature),
             ("code patch", "yes" if getattr(plan, "code_patch", "").strip() else "no"),

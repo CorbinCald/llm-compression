@@ -280,6 +280,23 @@ def _repo_result_summary(repo: BenchmarkRepo, result: PipelineResult) -> dict[st
     final_iteration = result.iterations[-1] if result.iterations else None
     verification = final_iteration.verification if final_iteration else None
     failed_output = verification.all_output()[-8_000:] if verification and not verification.ok else ""
+    repair_diagnostics = []
+    if final_iteration:
+        for candidate in final_iteration.candidates:
+            if candidate.repair is None and candidate.repaired_verification is None:
+                continue
+            repaired = candidate.repaired_verification
+            repair_diagnostics.append(
+                {
+                    "candidate": candidate.index,
+                    "repair": candidate.repair.to_json() if candidate.repair else None,
+                    "repaired_verification_ok": repaired.ok if repaired else None,
+                    "repaired_check_pass_count": repaired.check_pass_count if repaired else 0,
+                    "repaired_check_count": repaired.check_count if repaired else 0,
+                    "accepted": candidate.success,
+                    "note": "repair is diagnostic only; accepted requires raw decompression verification",
+                }
+            )
     return {
         "repo": repo.__dict__,
         "target": result.target.target,
@@ -294,6 +311,7 @@ def _repo_result_summary(repo: BenchmarkRepo, result: PipelineResult) -> dict[st
         "check_pass_count": verification.check_pass_count if verification else 0,
         "check_count": verification.check_count if verification else 0,
         "failed_output_tail": failed_output,
+        "repair_diagnostics": repair_diagnostics,
         "stopped_reason": result.stopped_reason,
     }
 

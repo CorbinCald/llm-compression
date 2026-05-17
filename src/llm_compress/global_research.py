@@ -23,8 +23,10 @@ Goal:
 
 You may update the global seed experiment plan for the next repo. This seed plan can tune:
 model, compression/decompression prompt addenda, format variant, chunking strategy, chunk size,
-candidate count, repair enablement, max LLM bytes, temperature, and optional temporary code_patch.
-max LLM bytes may be raised above the user default, but not lowered to avoid hard files.
+candidate count, diagnostic repair enablement, max LLM bytes, temperature, and optional temporary code_patch.
+Repair is diagnostic only: repaired candidates are not accepted as benchmark success, but their paths,
+notes, and reverification results can guide future seed plans. max LLM bytes may be raised above the
+user default, but not lowered to avoid hard files.
 
 Return only JSON with this schema:
 {
@@ -79,11 +81,11 @@ class GlobalResearchAgent:
         fallback = GlobalResearchState(
             reason="initial global benchmark strategy",
             lessons=[
-                "Start with repair and candidate competition enabled so ambiguous decompressions can be resolved by verification.",
+                "Start with diagnostic repair and candidate competition enabled so failed decompressions produce useful next-plan feedback without counting repaired trees as success.",
                 "Do not use path-specific source-file lossless overrides; tune prompts, chunking, models, candidates, repair, and thresholds instead.",
             ],
             seed_plan=ResearchPlan(
-                hypothesis="global initial seed: file-level component_v1 with repair and candidate competition",
+                hypothesis="global initial seed: file-level component_v1 with diagnostic repair and candidate competition",
                 model=self.allowed_models[0],
                 format_variant="component_v1",
                 chunking_strategy="file",
@@ -205,7 +207,7 @@ class GlobalResearchAgent:
                 f"{repo_name} failed; strengthen recoverability globally before later repos."
             )
             seed = ResearchPlan(
-                hypothesis=f"after {repo_name} failure: use testsafe/literal-heavy chunked compression with repair",
+                hypothesis=f"after {repo_name} failure: use testsafe/literal-heavy chunked compression with diagnostic repair",
                 model=_next_model(previous_plan.model, self.allowed_models),
                 compression_prompt_extra=(
                     previous_plan.compression_prompt_extra + "\nPreserve exact public APIs, literals, exceptions, import/export names, "

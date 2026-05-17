@@ -21,7 +21,9 @@ Honor the autoresearch loop: propose one experiment, let the harness execute it,
 inspect the metric and logs, then keep/discard/adjust in the next proposal.
 Change every relevant variable when evidence suggests it could help: prompt wording,
 model choice, chunking, compression format variant, decompression candidate count,
-repair from failed tests, and temporary tool-code patches. Do not use source-file
+repair from failed tests, and temporary tool-code patches. Repair is diagnostic only:
+a repaired candidate is not accepted as success, but its changed paths, notes, and
+reverification result are fed into the next experiment. Do not use source-file
 lossless overrides; if an LLM-eligible source file fails verification, improve the
 compression/decompression strategy or tool implementation rather than preserving that
 file exactly.
@@ -34,9 +36,10 @@ You output exactly one JSON object that describes the next experiment for the ha
 You may temporarily change the llm-compression tool itself by setting code_patch to a unified diff. The context includes a directory tree and selected source files from this repository. The harness applies that diff to an isolated copy of this repository for one experiment, uses the patched copy for compression/decompression, then discards it. The main harness still performs scoring and verification, so patches must genuinely improve restored code behavior rather than bypass verification.
 
 Core objective:
-- Primary metric: restored repo verification must match/pass baseline tests, lints, and builds.
+- Primary metric: raw decompressed repo verification must match/pass baseline tests, lints, and builds before any repair.
 - Secondary metric: lower artifact_bytes/original_bytes is better.
 - Prefer the most compressed verified strategy; do not mark LLM-eligible source files lossless.
+- Diagnostic repair may run after failure, but repaired candidates are not accepted; use repair diagnostics to improve the next fresh decompression.
 
 You may adjust all experiment variables:
 - model: choose one allowed OpenRouter model.
@@ -46,7 +49,7 @@ You may adjust all experiment variables:
 - chunking_strategy: one of file, line_chunks.
 - chunk_size_lines: positive integer used when chunking_strategy is line_chunks.
 - candidate_count: number of independent decompressions that compete.
-- repair_enabled: whether failed candidates should be patched by an LLM using verification output.
+- repair_enabled: whether failed candidates should be diagnostically patched by an LLM using verification output. Repaired candidates are not accepted as success.
 - max_llm_bytes: max source file bytes eligible for LLM compression; may be raised above the user default, but not lowered to avoid hard files.
 - temperature: OpenRouter sampling temperature for compression/decompression/repair.
 - code_patch: optional unified diff against this llm-compression repo. Use it to improve the compressor, decompressor, prompts, file classification, artifact handling, or other tool code when parameter tuning is not enough. Leave it empty when no tool-code change is needed.
@@ -236,7 +239,7 @@ class ResearchAgent:
 
     def _fallback_initial(self, context: dict[str, Any]) -> ResearchPlan:
         return ResearchPlan(
-            hypothesis="initial file-level component_v1 run with repair and candidate competition enabled",
+            hypothesis="initial file-level component_v1 run with diagnostic repair and candidate competition enabled",
             model=self.allowed_models[0],
             format_variant="component_v1",
             chunking_strategy="file",
@@ -254,7 +257,7 @@ class ResearchAgent:
         failed_count = len(history)
         if failed_count == 1:
             return ResearchPlan(
-                hypothesis="failure after file-level compression; try smaller chunks, a more literal prompt, and repair",
+                hypothesis="failure after file-level compression; try smaller chunks, a more literal prompt, and diagnostic repair",
                 model=_next_model(previous.model, self.allowed_models),
                 compression_prompt_extra=(
                     "Preserve exact public API, import/export names, error messages, branching conditions, "
@@ -276,7 +279,7 @@ class ResearchAgent:
                 temperature=0.2,
             )
         return ResearchPlan(
-            hypothesis="verification still fails; use testsafe format, smaller chunks, and stronger reconstruction constraints",
+            hypothesis="verification still fails; use testsafe format, smaller chunks, diagnostic repair, and stronger reconstruction constraints",
             model=_next_model(previous.model, self.allowed_models),
             compression_prompt_extra=(
                 "Tests failed before. Compress only when fully recoverable. Include exact edge cases, exceptions, "

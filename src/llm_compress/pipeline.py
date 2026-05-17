@@ -59,10 +59,6 @@ class CandidateResult:
     success: bool
     score: float
 
-    @property
-    def effective_verification(self) -> VerificationReport | None:
-        return self.repaired_verification or self.verification
-
     def to_json(self) -> dict[str, Any]:
         return {
             "index": self.index,
@@ -308,7 +304,7 @@ def run_target(
             restore_dir=best.restore_dir,
             compression=compression,
             decompression=best.decompression,
-            verification=best.effective_verification,
+            verification=best.verification,
             success=best.success,
             lossless_overrides=sorted(research_plan.lossless_overrides),
             plan=research_plan,
@@ -601,11 +597,18 @@ def _evaluate_candidate(
         and not verification.ok
         and not decompression.errors
     ):
-        step("Verification failed; attempting LLM repair")
+        step("Verification failed; attempting diagnostic LLM repair")
+        repair_dir = restore_dir
+        if iteration_client and iteration_client.available:
+            repair_dir = restore_dir.parent / f"{restore_dir.name}-repair"
+            if repair_dir.exists():
+                shutil.rmtree(repair_dir)
+            shutil.copytree(restore_dir, repair_dir, symlinks=True)
+            detail("diagnostic repair dir", repair_dir)
         repair = repair_restored_candidate(
             client=iteration_client,
             artifact_path=artifact_path,
-            restore_dir=restore_dir,
+            restore_dir=repair_dir,
             verification=verification,
             allowed_paths=compression.llm_paths,
             prompt_extra=research_plan.decompression_prompt_extra,
@@ -614,7 +617,7 @@ def _evaluate_candidate(
             ok(f"Repair changed {len(repair.repaired_paths)} file(s): {', '.join(repair.repaired_paths[:4])}")
             step("Re-running verification after repair")
             repaired_verification = run_verification(
-                restore_dir,
+                repair_dir,
                 verification_plan,
                 timeout=run_options.timeout,
                 setup_timeout=run_options.setup_timeout,
@@ -624,6 +627,11 @@ def _evaluate_candidate(
                 repaired_verification,
                 label=f"Candidate {candidate_index + 1} repaired verification",
             )
+            if repaired_verification.ok:
+                warn(
+                    "Diagnostic repair passed, but this candidate still counts as failed; "
+                    "autoresearch must find a fresh unrepaired decompression that passes."
+                )
         elif repair.error:
             fail(f"Repair failed: {repair.error}")
         elif repair.attempted:
@@ -631,15 +639,14 @@ def _evaluate_candidate(
         else:
             warn(f"Repair skipped. {repair.notes}".strip())
 
-    effective_verification = repaired_verification or verification
     success = _candidate_success(
         baseline=baseline,
-        verification=effective_verification,
+        verification=verification,
         decompression=decompression,
         verify=run_options.verify,
     )
     score = _candidate_score(
-        verification=effective_verification,
+        verification=verification,
         decompression=decompression,
         verify=run_options.verify,
     )
@@ -657,7 +664,7 @@ def _evaluate_candidate(
         index=candidate_index,
         success=success,
         score=score,
-        verification=effective_verification,
+        verification=verification,
         decompression=decompression,
     )
     return candidate_result
@@ -709,6 +716,7 @@ def _history_entry(iteration: IterationResult) -> dict[str, Any]:
     plan_json = iteration.plan.to_json()
     if len(str(plan_json.get("code_patch", ""))) > 12_000:
         plan_json["code_patch"] = str(plan_json["code_patch"])[:12_000] + "\n... <truncated in history>"
+    repair_diagnostics = _repair_diagnostics_for_history(iteration.candidates)
     return {
         "iteration": iteration.index,
         "plan": plan_json,
@@ -723,7 +731,29 @@ def _history_entry(iteration: IterationResult) -> dict[str, Any]:
             "failed_output_tail": failed_output,
         },
         "candidate_count": len(iteration.candidates),
+        "repair_diagnostics": repair_diagnostics,
     }
+
+
+def _repair_diagnostics_for_history(candidates: list[CandidateResult]) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate.repair is None and candidate.repaired_verification is None:
+            continue
+        repaired = candidate.repaired_verification
+        diagnostics.append(
+            {
+                "candidate": candidate.index,
+                "repair": candidate.repair.to_json() if candidate.repair else None,
+                "repaired_verification_ok": repaired.ok if repaired else None,
+                "repaired_check_pass_count": repaired.check_pass_count if repaired else 0,
+                "repaired_check_count": repaired.check_count if repaired else 0,
+                "repaired_failed_output_tail": repaired.all_output()[-4_000:] if repaired and not repaired.ok else "",
+                "accepted": candidate.success,
+                "note": "repair is diagnostic only; accepted requires raw decompression verification",
+            }
+        )
+    return diagnostics
 
 
 def _research_context(

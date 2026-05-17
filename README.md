@@ -35,7 +35,7 @@ The separate `llm-compress autoresearch ...` command can additionally:
   - Go: `go test`, `go vet`, `go build`;
   - Rust: `cargo test`, `cargo clippy` when available, `cargo build`;
 - decompress multiple competing restored repo candidates;
-- use failed verification output for optional LLM repair;
+- use failed verification output for optional diagnostic LLM repair;
 - invoke an autoresearch LLM to adjust prompts, model, chunking, format variant, candidates, repair, and size thresholds between iterations;
 - run global benchmark learning across the built-in seven-repo suite.
 
@@ -179,18 +179,18 @@ For each target:
    - compression format variant;
    - whole-file vs line-chunk compression and chunk size;
    - number of competing decompression candidates;
-   - whether failed tests/lints/builds should drive LLM repair;
+   - whether failed tests/lints/builds should drive diagnostic LLM repair;
    - max bytes eligible for LLM compression, which autoresearch may raise but not lower below the CLI default;
    - sampling temperature;
    - temporary `code_patch` unified diffs against the llm-compression tool codebase for isolated experiments.
 3. Compress the repo with that plan. Tests/config/locks/binaries and user-threshold oversized files remain deterministic lossless records, but autoresearch cannot add path-specific source-file lossless overrides.
 4. Decompress `candidate_count` restored repos. Each candidate is independently verified.
-5. If verification fails and `repair_enabled` is true, an LLM repair pass receives failed verification output, compressed components, and current reconstructed file content, writes full repaired files, and the candidate is reverified.
-6. Competing candidates are scored by decompression health and verification pass count; the best candidate is accepted if it passes.
-7. If no candidate passes, the research LLM receives the previous plan, compression stats, candidate scores, and failed output tails, then proposes the next experiment without opting source files out of compression.
+5. If raw verification fails and `repair_enabled` is true, an LLM diagnostic repair pass receives failed verification output, compressed components, and current reconstructed file content, writes full repaired files, and the candidate is reverified for diagnosis only.
+6. Competing candidates are scored and accepted using the unrepaired decompression result. A repaired candidate never counts as success; autoresearch must find a fresh decompression that passes without repair.
+7. If no raw candidate passes, the research LLM receives the previous plan, compression stats, raw candidate scores, failed output tails, and repair diagnostics such as changed paths and repaired reverification results, then proposes the next experiment without opting source files out of compression.
 8. Repeat until success or `--max-iterations`.
 
-The primary loss metric is verification failure: tests/lints/builds that pass on baseline should pass after decompression. The secondary metric is compression ratio. The research controller receives a directory tree and selected source files from this repository; when needed, it can include a `code_patch` unified diff. The patch is applied only to an isolated copy for that experiment's compression/decompression step and then discarded; the main harness still performs scoring and verification.
+The primary loss metric is raw-decompression verification failure: tests/lints/builds that pass on baseline should pass after decompression before any repair. The secondary metric is compression ratio. The research controller receives a directory tree and selected source files from this repository; when needed, it can include a `code_patch` unified diff. The patch is applied only to an isolated copy for that experiment's compression/decompression step and then discarded; the main harness still performs scoring and verification.
 
 ## Global benchmark learning
 

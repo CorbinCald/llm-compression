@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .openrouter import LLMError, OpenRouterClient
@@ -93,6 +94,23 @@ class GlobalResearchAgent:
             history=[],
             previous_state=None,
             fallback=fallback,
+            default_max_llm_bytes=default_max_llm_bytes,
+        )
+
+    def resume_state(
+        self,
+        *,
+        suite_context: dict[str, Any],
+        history: list[dict[str, Any]],
+        previous_state: GlobalResearchState,
+        default_max_llm_bytes: int,
+    ) -> GlobalResearchState:
+        return self._propose(
+            phase="resume_global_strategy",
+            suite_context=suite_context,
+            history=history,
+            previous_state=previous_state,
+            fallback=previous_state,
             default_max_llm_bytes=default_max_llm_bytes,
         )
 
@@ -241,6 +259,38 @@ def _state_from_json(
         lessons=_dedupe_tail(lessons, 20),
         seed_plan=seed,
     )
+
+
+def load_global_research_file(
+    path: Path,
+    *,
+    allowed_models: list[str],
+    max_candidates: int,
+    default_max_llm_bytes: int,
+) -> tuple[GlobalResearchState, list[dict[str, Any]]] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    state_data = data.get("state")
+    if not isinstance(state_data, dict):
+        return None
+    state = _state_from_json(
+        state_data,
+        default_model=(allowed_models[0] if allowed_models else "openrouter/auto"),
+        allowed_models=allowed_models,
+        max_candidates=max_candidates,
+        default_max_llm_bytes=default_max_llm_bytes,
+    )
+
+    history_data = data.get("history", [])
+    history = [item for item in history_data if isinstance(item, dict)] if isinstance(history_data, list) else []
+    return state, history[-50:]
 
 
 def _latest_plan(history: list[dict[str, Any]]) -> ResearchPlan | None:

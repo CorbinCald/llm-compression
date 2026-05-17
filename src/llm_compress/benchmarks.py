@@ -6,7 +6,7 @@ from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
-from .global_research import GlobalResearchAgent, GlobalResearchState
+from .global_research import GlobalResearchAgent, GlobalResearchState, load_global_research_file
 from .openrouter import OpenRouterClient
 from .pipeline import PipelineResult, RunOptions, run_target
 
@@ -120,11 +120,31 @@ def run_benchmarks(
         allowed_models=model_candidates,
         max_candidates=options.max_candidates,
     )
-    global_state = global_agent.initial_state(
-        suite_context=suite_context,
+    persisted = load_global_research_file(
+        _global_state_path(options.runs_root),
+        allowed_models=model_candidates,
+        max_candidates=options.max_candidates,
         default_max_llm_bytes=options.max_llm_bytes,
     )
-    global_history: list[dict[str, Any]] = []
+    if persisted:
+        persisted_state, global_history = persisted
+        global_state = global_agent.resume_state(
+            suite_context={**suite_context, "resumed_from": str(_global_state_path(options.runs_root))},
+            history=global_history,
+            previous_state=persisted_state,
+            default_max_llm_bytes=options.max_llm_bytes,
+        )
+        print(
+            f"Loaded persisted global research: lessons={len(global_state.lessons)} "
+            f"history={len(global_history)}",
+            flush=True,
+        )
+    else:
+        global_state = global_agent.initial_state(
+            suite_context=suite_context,
+            default_max_llm_bytes=options.max_llm_bytes,
+        )
+        global_history: list[dict[str, Any]] = []
     results: list[PipelineResult] = []
     failures: list[BenchmarkFailure] = []
     _write_global_state(options.runs_root, "initial", global_state, global_history)
@@ -276,7 +296,7 @@ def _write_global_state(
     state: GlobalResearchState,
     history: list[dict[str, Any]],
 ) -> None:
-    path = runs_root.parent / "benchmark-global-research.json"
+    path = _global_state_path(runs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "label": label,
@@ -284,3 +304,7 @@ def _write_global_state(
         "history": history,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _global_state_path(runs_root: Path) -> Path:
+    return runs_root.parent / "benchmark-global-research.json"

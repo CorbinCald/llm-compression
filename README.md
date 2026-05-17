@@ -198,11 +198,13 @@ The primary loss metric is verification failure: tests/lints/builds that pass on
 5. Repo 2 starts from the updated global seed.
 6. This repeats through all seven repos.
 
-Global state is written to:
+Global state is written to and automatically reloaded from:
 
 ```text
 .llm-compress/benchmark-global-research.json
 ```
+
+This makes benchmark lessons persist across separate `llm-compress autoresearch --benchmarks` invocations. A later benchmark run seeds the global strategy and per-repo researcher context with the previous run's lessons and recent repo history.
 
 Path-specific source-file `lossless_overrides` are disabled. Global learning carries general lessons via prompts, model choice, format variant, chunking, candidate count, repair behavior, size thresholds, and temperature.
 

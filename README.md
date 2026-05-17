@@ -1,31 +1,220 @@
 # LLM Compression
 
-## Objective: For a given file or codebase, reduce chars at the cost of inference, while maintaining identical function.
+Compress a file or codebase into recoverable component descriptions and restore it later. LLM-compressed components are decompressed with an LLM; lossless records restore exactly. Autoresearch is available as a separate opt-in command for improving compression strategies, but it is not required for normal compression/decompression.
 
-### Component compression format
+## Core idea
 
-`<-Name:name|Input:inputs or none|Return:exact behavior/code-shaped spec|Path:path|Order:order+indent->`
+For a given file or codebase, reduce chars at the cost of inference while maintaining identical function.
+
+Component compression format:
+
+```text
+<-Name:name|Input:inputs or none|Return:exact behavior/code-shaped spec|Path:path|Order:order+indent->
+```
 
 `Order` is file order plus indent level, where `a` is top-level. Compression is only valid when expansion is recoverable: keep exact names, literals, selectors, globs, protocol shapes, formulas, and side effects. Prefer code-shaped specs over prose; omit only formatting/comments that do not affect behavior.
 
-#### Examples of compressed components:
+## What is built
 
+This repo now provides a Python CLI named `llm-compress`.
+
+Normal compression can:
+
+- accept a local repo/file or public git URL;
+- clone/copy the target into an isolated run directory;
+- compress source files with OpenRouter-backed LLM calls;
+- keep tests, lockfiles, package metadata, generated-risk files, binaries, and oversized files lossless;
+- write a `compressed.jsonl` artifact under `.llm-compress/runs/`;
+- decompress an artifact back into a restored tree, using an LLM only for files that were stored as LLM components.
+
+The separate `llm-compress autoresearch ...` command can additionally:
+
+- detect and run project verification commands:
+  - Python: pytest, ruff if configured, wheel build;
+  - Node: package-manager install, lint/build/test scripts;
+  - Go: `go test`, `go vet`, `go build`;
+  - Rust: `cargo test`, `cargo clippy` when available, `cargo build`;
+- decompress multiple competing restored repo candidates;
+- use failed verification output for optional LLM repair;
+- invoke an autoresearch LLM to adjust prompts, model, chunking, format variant, candidates, repair, and size thresholds between iterations;
+- run global benchmark learning across the built-in seven-repo suite.
+
+The artifact is JSONL (`compressed.jsonl`). LLM-compressed files store component lines; exact fallback files store deterministic gzip+base64 bytes.
+
+## Quickstart
+
+Run the built-in benchmark suite with Claude Sonnet 4.6 as the research/controller model, Gemini Flash Lite as the worker model, and two autoresearch iterations per repo:
+
+```bash
+PYTHONPATH=src python3 -m llm_compress autoresearch --benchmarks --research-model anthropic/claude-sonnet-4.6 --model google/gemini-3.1-flash-lite --models google/gemini-3.1-flash-lite --max-iterations 2
 ```
-<-Name:paintSquareClickHandlers|Input:outer squares,socket,color(live)|Return:squares.forEach((sq,i)=>sq.addEventListener('click',()=>socket.send(JSON.stringify({paint:{index:i,color}}))))|Path:./client/app.js|Order:12a->
 
-<-Name:h1|Input:none|Return:h1{font-size:2.5rem;font-weight:700;letter-spacing:2px;margin:0 0 20px;background:linear-gradient(90deg,#ff6b6b,#feca57,#48dbfb,#1dd1a1);-webkit-background-clip:text;background-clip:text;color:transparent}|Path:./client/style.css|Order:2a->
+Set `OPENROUTER_API_KEY` first, or install the CLI and use `llm-compress` instead of `PYTHONPATH=src python3 -m llm_compress`.
 
-<-Name:serverBootstrap|Input:none|Return:const express=require('express');const{WebSocketServer,WebSocket}=require('ws');const app=express();app.use(express.static('client'));const server=app.listen(3000,()=>console.log(`Server Running on 3000`));const wss=new WebSocketServer({server});const participants=[];const grid=[]|Path:./server.js|Order:1a->
+## Install/use locally
 
-<-Name:getPhotos|Input:count:int,size:num|Return:return Object.fromEntries(Array.from({length:count},(_,i)=>[`photo${i+1}`,`https://picsum.photos/${size}?random=${i+1}`]))|Path:./app/index.tsx|Order:4d->
-
-<-Name:gitIgnore|Input:none|Return:ignore exactly:node_modules/ .expo/ dist/ web-build/ expo-env.d.ts .kotlin/ *.orig.* *.jks *.p8 *.p12 *.key *.mobileprovision .metro-health-check* npm-debug.* yarn-debug.* yarn-error.* .DS_Store *.pem .env*.local *.tsbuildinfo app-example /ios /android|Path:./.gitignore|Order:1a->
+```bash
+python3 -m pip install -e .
 ```
 
-## Transcoder: a transcoding function will take the ultraconcise description, pass it through a cost-effective LLM, and assemble it into the equivalent file. Function position and nesting will be handled programatically based on the the Path and Order artifacts.
+Set your OpenRouter key for LLM compression/decompression:
 
-## Tests: Unit tests ensure minimal lossiness upon compression and decompression.
+```bash
+export OPENROUTER_API_KEY=...
+# optional worker model; default is openrouter/auto
+export OPENROUTER_MODEL=openrouter/auto
+# optional research/controller model; default is anthropic/claude-sonnet-4.6
+export OPENROUTER_RESEARCH_MODEL=anthropic/claude-sonnet-4.6
+# optional worker candidates the autoresearch LLM can choose among
+export OPENROUTER_MODELS=openrouter/auto,provider/model-name
+```
 
-## Iterability: The project will be improved iteratively inspired by **Karpathy's Autoresearch** (https://github.com/karpathy/autoresearch), with the loss metric being tests failed.
+Compress once without autoresearch:
 
-### To start, we can use ~7 public Github repos of sizes, compress them in parallel, decompress them, and measure the difference in tests passed or failed, after which point the LLM will iterate to improve test success. We are starting with 4 Small Repos, 2 Medium, and 1 Large repo.
+```bash
+llm-compress ./some-repo
+llm-compress https://github.com/pallets/itsdangerous.git
+# explicit equivalent
+llm-compress compress ./some-repo
+```
+
+Run the opt-in compress → decompress candidates → verify → autoresearch loop:
+
+```bash
+llm-compress autoresearch ./some-repo
+llm-compress autoresearch https://github.com/pallets/itsdangerous.git
+```
+
+Decompress an artifact or the latest artifact remembered for a target:
+
+```bash
+llm-compress -d .llm-compress/runs/<run>/compressed.jsonl -o restored-repo
+llm-compress -d .llm-compress/runs/<run>/final/compressed.jsonl -o restored-repo  # autoresearch final artifact
+llm-compress decompress .llm-compress/runs/<run>/compressed.jsonl -o restored-repo
+llm-compress -d ./some-repo -o restored-repo
+llm-compress -d https://github.com/pallets/itsdangerous.git -o restored-repo
+```
+
+If `OPENROUTER_API_KEY` is absent, compression falls back to lossless-only artifacts. Those artifacts decompress without a key. Decompressing an artifact that already contains LLM components still requires `OPENROUTER_API_KEY`.
+
+Useful normal-compression flags:
+
+```bash
+llm-compress ./repo --workers 8
+llm-compress ./repo --max-llm-bytes 40000
+llm-compress ./repo --no-llm
+llm-compress ./repo --format-variant component_literal_heavy
+llm-compress ./repo --chunking-strategy line_chunks --chunk-size-lines 80
+```
+
+Useful autoresearch flags:
+
+```bash
+llm-compress autoresearch ./repo --max-iterations 5
+llm-compress autoresearch ./repo --workers 8
+llm-compress autoresearch ./repo --max-candidates 3
+llm-compress autoresearch ./repo --research-model anthropic/claude-sonnet-4.6
+llm-compress autoresearch ./repo --models openrouter/auto,provider/model-name
+llm-compress autoresearch ./repo --program ./program.md
+llm-compress autoresearch ./repo --max-llm-bytes 40000
+llm-compress autoresearch ./repo --no-install       # skip auto dependency install
+llm-compress autoresearch ./repo --no-verify        # compress/decompress candidates only
+llm-compress autoresearch ./repo --continue-on-baseline-fail
+```
+
+General model/iteration syntax:
+
+```bash
+llm-compress autoresearch TARGET --research-model anthropic/claude-sonnet-4.6 --model provider/worker-model --models provider/worker-model --max-iterations N
+llm-compress autoresearch --benchmarks --research-model anthropic/claude-sonnet-4.6 --model provider/worker-model --models provider/worker-model --max-iterations N
+```
+
+`--research-model` selects the OpenRouter model used by the autoresearch/global-research controller. `--model` selects the default worker model for compression/decompression/repair. `--models` is the comma-separated worker candidate set the autoresearch controller may choose from. `--max-iterations` is per target; in benchmark mode it applies to each built-in repo.
+
+## Built-in seven-repo benchmark set
+
+For opt-in autoresearch benchmarking, the CLI includes seven public GitHub repos of varied language/size:
+
+| Size | Repo | Type |
+| --- | --- | --- |
+| small | `https://github.com/ai/nanoid.git` | JavaScript/TypeScript package |
+| small | `https://github.com/pallets/itsdangerous.git` | Python library |
+| small | `https://github.com/gorilla/mux.git` | Go router |
+| small | `https://github.com/dtolnay/itoa.git` | Rust crate |
+| medium | `https://github.com/pallets/click.git` | Python CLI library |
+| medium | `https://github.com/expressjs/express.git` | Node web framework |
+| large | `https://github.com/lodash/lodash.git` | JavaScript utility library |
+
+List them:
+
+```bash
+llm-compress --list-benchmarks
+```
+
+Run them with global autoresearch learning enabled:
+
+```bash
+llm-compress autoresearch --benchmarks --workers 4
+# alias
+llm-compress benchmarks --workers 4
+```
+
+Because each repo's outcome seeds the strategy for the next repo, benchmark repos run sequentially. `--repo-workers` is ignored in global benchmark mode.
+
+## Autoresearch loop
+
+The MVP now uses an LLM-driven autoresearch controller inspired by Karpathy's `autoresearch`: a human-editable `program.md` defines the research organization, the harness runs one bounded experiment at a time, the project verification result is the loss metric, and the research LLM proposes the next experiment from the observed logs.
+
+For each target:
+
+1. Run baseline project verification on the original copied/cloned source.
+2. Ask the autoresearch LLM for an experiment plan. The plan can change:
+   - OpenRouter worker model candidate;
+   - compression prompt addendum;
+   - decompression prompt addendum;
+   - compression format variant;
+   - whole-file vs line-chunk compression and chunk size;
+   - number of competing decompression candidates;
+   - whether failed tests/lints/builds should drive LLM repair;
+   - max bytes eligible for LLM compression, which autoresearch may raise but not lower below the CLI default;
+   - sampling temperature.
+3. Compress the repo with that plan. Tests/config/locks/binaries and user-threshold oversized files remain deterministic lossless records, but autoresearch cannot add path-specific source-file lossless overrides.
+4. Decompress `candidate_count` restored repos. Each candidate is independently verified.
+5. If verification fails and `repair_enabled` is true, an LLM repair pass receives failed verification output, compressed components, and current reconstructed file content, writes full repaired files, and the candidate is reverified.
+6. Competing candidates are scored by decompression health and verification pass count; the best candidate is accepted if it passes.
+7. If no candidate passes, the research LLM receives the previous plan, compression stats, candidate scores, and failed output tails, then proposes the next experiment without opting source files out of compression.
+8. Repeat until success or `--max-iterations`.
+
+The primary loss metric is verification failure: tests/lints/builds that pass on baseline should pass after decompression. The secondary metric is compression ratio.
+
+## Global benchmark learning
+
+`llm-compress autoresearch --benchmarks` runs a suite-level meta-research loop, not seven isolated loops:
+
+1. A global research LLM proposes an initial seed strategy for the whole benchmark suite.
+2. Repo 1 runs the normal per-repo autoresearch loop using that seed.
+3. The repo result is summarized: success/failure, final plan, compression ratio, verification counts, and failed output tail.
+4. The global research LLM updates global lessons and a new seed plan.
+5. Repo 2 starts from the updated global seed.
+6. This repeats through all seven repos.
+
+Global state is written to:
+
+```text
+.llm-compress/benchmark-global-research.json
+```
+
+Path-specific source-file `lossless_overrides` are disabled. Global learning carries general lessons via prompts, model choice, format variant, chunking, candidate count, repair behavior, size thresholds, and temperature.
+
+## Development validation
+
+This project intentionally uses only the Python standard library at runtime.
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m compileall -q src tests
+```
+
+## Prompt references
+
+The compression/decompression prompts live in `PROMPTS.md` and are embedded in `src/llm_compress/prompts.py`.

@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from .openrouter import LLMError, OpenRouterClient
+from .research import ResearchPlan
+
+GLOBAL_RESEARCH_SYSTEM_PROMPT = """You run global meta-research for llm-compress across a seven-repo benchmark suite.
+
+You do not edit files. You output exactly one JSON object that updates the global strategy for future repos.
+
+Goal:
+- Learn lessons from every completed repo and apply them to later repos.
+- Primary metric: each restored repo must pass the baseline tests/lints/builds.
+- Secondary metric: lower artifact_bytes/original_bytes is better.
+- Prefer lessons that generalize across languages/repos; source-file lossless overrides are banned.
+
+You may update the global seed experiment plan for the next repo. This seed plan can tune:
+model, compression/decompression prompt addenda, format variant, chunking strategy, chunk size,
+candidate count, repair enablement, max LLM bytes, and temperature. max LLM bytes may be raised above the user default, but not lowered to avoid hard files.
+
+Return only JSON with this schema:
+{
+  "reason": "short explanation of what changed globally and why",
+  "lessons": ["global lesson 1", "global lesson 2"],
+  "seed_plan": {
+    "hypothesis": "short reason for this global seed plan",
+    "model": "one allowed model",
+    "compression_prompt_extra": "string, may be empty",
+    "decompression_prompt_extra": "string, may be empty",
+    "format_variant": "component_v1|component_contracts|component_testsafe|component_literal_heavy",
+    "chunking_strategy": "file|line_chunks",
+    "chunk_size_lines": 80,
+    "candidate_count": 1,
+    "repair_enabled": true,
+    "lossless_overrides": [],
+    "max_llm_bytes": 20000,
+    "temperature": 0.1
+  }
+}
+"""
+
+
+@dataclass
+class GlobalResearchState:
+    reason: str = "initial global strategy"
+    lessons: list[str] = field(default_factory=list)
+    seed_plan: ResearchPlan = field(default_factory=ResearchPlan)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "lessons": self.lessons,
+            "seed_plan": self.seed_plan.to_json(),
+        }
+
+
+class GlobalResearchAgent:
+    def __init__(
+        self,
+        client: OpenRouterClient | None,
+        *,
+        allowed_models: list[str],
+        max_candidates: int,
+    ):
+        self.client = client
+        self.allowed_models = allowed_models or ([client.model] if client else ["openrouter/auto"])
+        self.max_candidates = max(1, max_candidates)
+
+    def initial_state(self, *, suite_context: dict[str, Any], default_max_llm_bytes: int) -> GlobalResearchState:
+        fallback = GlobalResearchState(
+            reason="initial global benchmark strategy",
+            lessons=[
+                "Start with repair and candidate competition enabled so ambiguous decompressions can be resolved by verification.",
+                "Do not use path-specific source-file lossless overrides; tune prompts, chunking, models, candidates, repair, and thresholds instead.",
+            ],
+            seed_plan=ResearchPlan(
+                hypothesis="global initial seed: file-level component_v1 with repair and candidate competition",
+                model=self.allowed_models[0],
+                format_variant="component_v1",
+                chunking_strategy="file",
+                candidate_count=min(2, self.max_candidates),
+                repair_enabled=True,
+                max_llm_bytes=default_max_llm_bytes,
+            ),
+        )
+        return self._propose(
+            phase="initial_global_strategy",
+            suite_context=suite_context,
+            history=[],
+            previous_state=None,
+            fallback=fallback,
+            default_max_llm_bytes=default_max_llm_bytes,
+        )
+
+    def update_state(
+        self,
+        *,
+        suite_context: dict[str, Any],
+        history: list[dict[str, Any]],
+        previous_state: GlobalResearchState,
+        default_max_llm_bytes: int,
+    ) -> GlobalResearchState:
+        fallback = self._fallback_update(previous_state, history, default_max_llm_bytes)
+        return self._propose(
+            phase="update_after_repo",
+            suite_context=suite_context,
+            history=history,
+            previous_state=previous_state,
+            fallback=fallback,
+            default_max_llm_bytes=default_max_llm_bytes,
+        )
+
+    def _propose(
+        self,
+        *,
+        phase: str,
+        suite_context: dict[str, Any],
+        history: list[dict[str, Any]],
+        previous_state: GlobalResearchState | None,
+        fallback: GlobalResearchState,
+        default_max_llm_bytes: int,
+    ) -> GlobalResearchState:
+        if not self.client or not self.client.available:
+            return fallback
+        payload = {
+            "phase": phase,
+            "allowed_models": self.allowed_models,
+            "suite_context": suite_context,
+            "previous_global_state": previous_state.to_json() if previous_state else None,
+            "completed_repo_history": history[-10:],
+            "fallback_if_uncertain": fallback.to_json(),
+        }
+        try:
+            response = self.client.chat(
+                system=GLOBAL_RESEARCH_SYSTEM_PROMPT,
+                user=json.dumps(payload, indent=2, sort_keys=True),
+                max_completion_tokens=3_000,
+            )
+            data = _extract_json_object(response)
+            return _state_from_json(
+                data,
+                default_model=fallback.seed_plan.model,
+                allowed_models=self.allowed_models,
+                max_candidates=self.max_candidates,
+                default_max_llm_bytes=default_max_llm_bytes,
+            )
+        except Exception as exc:  # noqa: BLE001 - global research failure should not stop benchmarks.
+            fallback.reason = f"global research LLM failed ({exc}); deterministic fallback"
+            return fallback
+
+    def _fallback_update(
+        self,
+        previous_state: GlobalResearchState,
+        history: list[dict[str, Any]],
+        default_max_llm_bytes: int,
+    ) -> GlobalResearchState:
+        if not history:
+            return previous_state
+        latest = history[-1]
+        previous_plan = _latest_plan(history) or previous_state.seed_plan
+        lessons = list(previous_state.lessons)
+        repo_name = str(latest.get("repo", {}).get("name", "repo"))
+        if latest.get("success"):
+            ratio = latest.get("ratio")
+            lessons.append(
+                f"{repo_name} passed with {previous_plan.format_variant}/{previous_plan.chunking_strategy}; ratio={ratio}. Prefer this unless later repos fail."
+            )
+            seed = ResearchPlan.from_json(
+                previous_plan.to_json(),
+                default_model=previous_plan.model,
+                allowed_models=self.allowed_models,
+                max_candidates=self.max_candidates,
+                default_max_llm_bytes=default_max_llm_bytes,
+            )
+            seed.lossless_overrides = []
+            seed.hypothesis = f"carry forward successful global strategy from {repo_name}"
+        else:
+            lessons.append(
+                f"{repo_name} failed; strengthen recoverability globally before later repos."
+            )
+            seed = ResearchPlan(
+                hypothesis=f"after {repo_name} failure: use testsafe/literal-heavy chunked compression with repair",
+                model=_next_model(previous_plan.model, self.allowed_models),
+                compression_prompt_extra=(
+                    previous_plan.compression_prompt_extra + "\nPreserve exact public APIs, literals, exceptions, import/export names, "
+                    "edge cases, side effects, and protocol shapes. If uncertain, include more code-shaped detail."
+                ).strip()[-3000:],
+                decompression_prompt_extra=(
+                    previous_plan.decompression_prompt_extra + "\nUse verification failures as constraints. Reconstruct minimal conservative code; "
+                    "do not invent behavior beyond the compressed components."
+                ).strip()[-3000:],
+                format_variant="component_testsafe",
+                chunking_strategy="line_chunks",
+                chunk_size_lines=80,
+                candidate_count=min(max(previous_plan.candidate_count, 2), self.max_candidates),
+                repair_enabled=True,
+                lossless_overrides=[],
+                max_llm_bytes=max(default_max_llm_bytes, previous_plan.max_llm_bytes),
+                temperature=0.1,
+            )
+        return GlobalResearchState(
+            reason="deterministic global fallback update",
+            lessons=_dedupe_tail(lessons, 12),
+            seed_plan=seed,
+        )
+
+
+def _state_from_json(
+    data: dict[str, Any],
+    *,
+    default_model: str,
+    allowed_models: list[str],
+    max_candidates: int,
+    default_max_llm_bytes: int,
+) -> GlobalResearchState:
+    raw_lessons = data.get("lessons", [])
+    lessons: list[str] = []
+    if isinstance(raw_lessons, list):
+        for item in raw_lessons:
+            if isinstance(item, str) and item.strip():
+                lessons.append(item.strip()[:500])
+    seed_data = data.get("seed_plan", {})
+    if not isinstance(seed_data, dict):
+        seed_data = {}
+    seed = ResearchPlan.from_json(
+        seed_data,
+        default_model=default_model,
+        allowed_models=allowed_models,
+        max_candidates=max_candidates,
+        default_max_llm_bytes=default_max_llm_bytes,
+    )
+    # Source-file lossless overrides are disabled globally and per repo.
+    seed.lossless_overrides = []
+    seed.max_llm_bytes = max(default_max_llm_bytes, seed.max_llm_bytes)
+    return GlobalResearchState(
+        reason=str(data.get("reason") or "global LLM update")[:1000],
+        lessons=_dedupe_tail(lessons, 20),
+        seed_plan=seed,
+    )
+
+
+def _latest_plan(history: list[dict[str, Any]]) -> ResearchPlan | None:
+    for entry in reversed(history):
+        plan_data = entry.get("final_plan")
+        if isinstance(plan_data, dict):
+            return ResearchPlan.from_json(
+                plan_data,
+                default_model=str(plan_data.get("model") or "openrouter/auto"),
+                allowed_models=[str(plan_data.get("model") or "openrouter/auto")],
+                max_candidates=10,
+                default_max_llm_bytes=int(plan_data.get("max_llm_bytes") or 20_000),
+            )
+    return None
+
+
+def _next_model(current: str, allowed_models: list[str]) -> str:
+    if not allowed_models:
+        return current
+    if current not in allowed_models:
+        return allowed_models[0]
+    return allowed_models[(allowed_models.index(current) + 1) % len(allowed_models)]
+
+
+def _dedupe_tail(items: list[str], limit: int) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        if item not in result:
+            result.append(item)
+    return result[-limit:]
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            stripped = "\n".join(lines[1:-1]).strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", stripped, re.DOTALL)
+        if not match:
+            raise LLMError(f"Global research response did not contain JSON: {text[:500]}")
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise LLMError("Global research response JSON was not an object")
+    return data

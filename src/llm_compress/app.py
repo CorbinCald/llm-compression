@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from .compressor import CompressionOptions, CompressionSummary, Compressor
+from .console import details, section, step, yes_no
 from .openrouter import OpenRouterClient
+from .reporting import log_compression_summary
 from .targets import PreparedTarget, prepare_target, update_index
 
 
@@ -55,9 +57,21 @@ def compress_target_once(
 ) -> DirectCompressionResult:
     prepared = prepare_target(target, options.runs_root)
     artifact_path = prepared.run_dir / "compressed.jsonl"
-    print(f"Run dir: {prepared.run_dir}", flush=True)
-    print(f"Source:  {prepared.source_root}", flush=True)
-    print("Compressing once; autoresearch is not active.", flush=True)
+    section("Compression run")
+    details(
+        (
+            ("target", prepared.target),
+            ("source", prepared.source_root),
+            ("run dir", prepared.run_dir),
+            ("autoresearch", "off"),
+            ("LLM enabled", yes_no(bool(client and client.available and options.use_llm))),
+            ("workers", options.workers),
+            ("max LLM bytes", options.max_llm_bytes),
+            ("format", options.format_variant),
+            ("chunking", options.chunking_strategy),
+        )
+    )
+    step("Compressing source files")
 
     compression = Compressor(client).compress_repo(
         prepared.source_root,
@@ -80,12 +94,7 @@ def compress_target_once(
         artifact_path=artifact_path,
     )
     _write_json(prepared.run_dir / "summary.json", result.to_json())
-    print(
-        f"Compressed: {artifact_path} "
-        f"files={compression.file_count} llm={compression.llm_file_count} "
-        f"lossless={compression.lossless_file_count} ratio={compression.ratio:.3f}",
-        flush=True,
-    )
+    log_compression_summary(compression)
     return result
 
 

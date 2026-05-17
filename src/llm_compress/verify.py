@@ -14,6 +14,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from .console import fail, format_duration, info, ok, print_output_tail, warn
+
 
 @dataclass(frozen=True)
 class VerificationCommand:
@@ -196,24 +198,37 @@ def run_verification(
 
     root = root.resolve()
     with _verification_execution_root(root, plan) as execution_root:
+        if print_progress and not plan.setup and not plan.checks:
+            warn("No verification commands to run.")
+
         if run_setup:
-            for command in plan.setup:
+            for index, command in enumerate(plan.setup, start=1):
                 if print_progress:
-                    print(f"  setup: {command.command}", flush=True)
+                    info(f"[setup {index}/{len(plan.setup)}] {command.name}", indent=2)
+                    info(f"$ {command.command}", indent=4)
                 result = run_command(execution_root, command, default_timeout=setup_timeout)
                 setup_results.append(result)
                 if print_progress:
-                    print(f"    -> {'ok' if result.ok else 'fail'} ({result.seconds:.1f}s)", flush=True)
+                    if result.ok:
+                        ok(f"setup {command.name} passed ({format_duration(result.seconds)})")
+                    else:
+                        fail(f"setup {command.name} failed (exit {result.returncode}, {format_duration(result.seconds)})")
+                        print_output_tail(result.output)
                 if not result.ok:
                     return VerificationReport(root, plan, setup_results, check_results)
 
-        for command in plan.checks:
+        for index, command in enumerate(plan.checks, start=1):
             if print_progress:
-                print(f"  check: {command.command}", flush=True)
+                info(f"[check {index}/{len(plan.checks)}] {command.name}", indent=2)
+                info(f"$ {command.command}", indent=4)
             result = run_command(execution_root, command, default_timeout=timeout)
             check_results.append(result)
             if print_progress:
-                print(f"    -> {'ok' if result.ok else 'fail'} ({result.seconds:.1f}s)", flush=True)
+                if result.ok:
+                    ok(f"check {command.name} passed ({format_duration(result.seconds)})")
+                else:
+                    fail(f"check {command.name} failed (exit {result.returncode}, {format_duration(result.seconds)})")
+                    print_output_tail(result.output)
 
     return VerificationReport(root, plan, setup_results, check_results)
 

@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .artifact import copy_artifact
+from .artifact import copy_artifact, write_artifact
 from .compressor import CompressionOptions, CompressionSummary, Compressor
+from .console import detail, details, fail, ok, section, step, subsection, warn, yes_no
 from .decompressor import DecompressionSummary, Decompressor
 from .files import iter_repo_paths, posix_rel
 from .openrouter import OpenRouterClient
 from .repair import RepairSummary, repair_restored_candidate
+from .reporting import (
+    log_candidate_outcome,
+    log_compression_summary,
+    log_decompression_summary,
+    log_research_plan,
+    log_verification_plan,
+    log_verification_report,
+)
 from .research import ResearchAgent, ResearchPlan, load_research_program
 from .targets import PreparedTarget, prepare_target, update_index
+from .tool_patch import apply_code_patch, build_tool_repo_context, copy_tool_repo
 from .verify import VerificationPlan, VerificationReport, discover_verification_plan, run_verification
 
 
@@ -129,13 +142,28 @@ def run_target(
     research_client: OpenRouterClient | None = None,
 ) -> PipelineResult:
     prepared = prepare_target(target, options.runs_root)
-    print(f"Run dir: {prepared.run_dir}", flush=True)
-    print(f"Source:  {prepared.source_root}", flush=True)
+    iteration_count = max(1, options.max_iterations)
+    section("Autoresearch run")
+    details(
+        (
+            ("target", prepared.target),
+            ("source", prepared.source_root),
+            ("run dir", prepared.run_dir),
+            ("iterations", iteration_count),
+            ("workers", options.workers),
+            ("verification", yes_no(options.verify)),
+            ("install deps", yes_no(options.install)),
+            ("LLM available", yes_no(bool(client and client.available))),
+        )
+    )
 
     plan = discover_verification_plan(prepared.source_root, install=options.install)
+    section("Verification plan")
+    log_verification_plan(plan)
+
     baseline: VerificationReport | None = None
     if options.verify:
-        print("Baseline verification", flush=True)
+        section("Baseline verification")
         baseline = run_verification(
             prepared.source_root,
             plan,
@@ -143,6 +171,7 @@ def run_target(
             setup_timeout=options.setup_timeout,
             print_progress=True,
         )
+        log_verification_report(baseline, label="Baseline verification")
         _write_json(prepared.run_dir / "baseline.json", baseline.to_json())
         if not baseline.ok and not options.continue_on_baseline_fail:
             reason = "baseline verification failed; rerun with --continue-on-baseline-fail to force compression"
@@ -156,10 +185,10 @@ def run_target(
                 stopped_reason=reason,
             )
             _write_json(prepared.run_dir / "summary.json", result.to_json())
-            print(reason, flush=True)
+            fail(reason)
             return result
     else:
-        print("Verification disabled", flush=True)
+        warn("Verification disabled; candidates will be accepted if decompression succeeds.")
 
     model_candidates = _model_candidates(client, options.model_candidates)
     context = _research_context(prepared.source_root, options, model_candidates, plan)
@@ -174,129 +203,105 @@ def run_target(
         options,
     )
     _write_json(prepared.run_dir / "research-initial-plan.json", research_plan.to_json())
+    section("Initial experiment")
+    log_research_plan(research_plan, title="hypothesis")
 
     iterations: list[IterationResult] = []
     history: list[dict[str, Any]] = []
 
-    for index in range(max(1, options.max_iterations)):
+    for index in range(iteration_count):
         iteration_dir = prepared.run_dir / f"iter-{index}"
         artifact_path = iteration_dir / "compressed.jsonl"
         iteration_dir.mkdir(parents=True, exist_ok=True)
         _write_json(iteration_dir / "research-plan.json", research_plan.to_json())
 
         iteration_client = _client_for_plan(client, research_plan)
-        print(
-            f"Iteration {index}: experiment model={research_plan.model} "
-            f"format={research_plan.format_variant} chunks={research_plan.chunking_strategy} "
-            f"candidates={research_plan.candidate_count} repair={research_plan.repair_enabled}",
-            flush=True,
-        )
-        print(f"Iteration {index}: compress", flush=True)
-        compression = Compressor(iteration_client).compress_repo(
-            prepared.source_root,
-            artifact_path,
-            options=CompressionOptions(
-                max_llm_bytes=research_plan.max_llm_bytes,
-                workers=options.workers,
-                use_llm=bool(iteration_client and iteration_client.available),
-                chunking_strategy=research_plan.chunking_strategy,
-                chunk_size_lines=research_plan.chunk_size_lines,
-                format_variant=research_plan.format_variant,
-                compression_prompt_extra=research_plan.compression_prompt_extra,
-            ),
-            target_label=prepared.target,
-        )
-        print(
-            f"  files={compression.file_count} llm={compression.llm_file_count} "
-            f"lossless={compression.lossless_file_count} ratio={compression.ratio:.3f}",
-            flush=True,
-        )
-
-        candidates: list[CandidateResult] = []
-        for candidate_index in range(max(1, research_plan.candidate_count)):
-            restore_dir = iteration_dir / f"candidate-{candidate_index}"
-            print(f"Iteration {index}: decompress candidate {candidate_index + 1}/{research_plan.candidate_count}", flush=True)
-            decompression = Decompressor(
-                iteration_client,
-                prompt_extra=research_plan.decompression_prompt_extra,
-                candidate_index=candidate_index,
-                candidate_count=max(1, research_plan.candidate_count),
-            ).decompress_artifact(
-                artifact_path,
-                restore_dir,
-                workers=options.workers,
-                clean=True,
+        section(f"Iteration {index + 1}/{iteration_count}")
+        log_research_plan(research_plan, title="trying")
+        if research_plan.code_patch.strip():
+            step("Applying temporary llm-compression code patch in an isolated copy")
+            compression, decompressed_candidates = _run_iteration_with_code_patch(
+                prepared=prepared,
+                iteration_dir=iteration_dir,
+                artifact_path=artifact_path,
+                research_plan=research_plan,
+                options=options,
             )
-            if decompression.errors:
-                print(f"  decompression errors: {len(decompression.errors)}", flush=True)
-
-            verification: VerificationReport | None = None
-            if options.verify and not decompression.errors:
-                print(f"Iteration {index}: verify candidate {candidate_index + 1}", flush=True)
-                verification = run_verification(
-                    restore_dir,
-                    plan,
-                    timeout=options.timeout,
-                    setup_timeout=options.setup_timeout,
-                    print_progress=True,
-                )
-            elif not options.verify:
-                print(f"Iteration {index}: verification skipped", flush=True)
-
-            repair: RepairSummary | None = None
-            repaired_verification: VerificationReport | None = None
-            if (
-                options.verify
-                and research_plan.repair_enabled
-                and verification is not None
-                and not verification.ok
-                and not decompression.errors
-            ):
-                print(f"Iteration {index}: repair candidate {candidate_index + 1}", flush=True)
-                repair = repair_restored_candidate(
-                    client=iteration_client,
-                    artifact_path=artifact_path,
-                    restore_dir=restore_dir,
-                    verification=verification,
-                    allowed_paths=compression.llm_paths,
-                    prompt_extra=research_plan.decompression_prompt_extra,
-                )
-                if repair.repaired_paths:
-                    print(f"  repaired {len(repair.repaired_paths)} file(s); reverifying", flush=True)
-                    repaired_verification = run_verification(
-                        restore_dir,
-                        plan,
-                        timeout=options.timeout,
-                        setup_timeout=options.setup_timeout,
-                        print_progress=True,
+            log_compression_summary(compression)
+            candidates: list[CandidateResult] = []
+            candidate_count = len(decompressed_candidates)
+            for candidate_index, restore_dir, decompression in decompressed_candidates:
+                subsection(f"Candidate {candidate_index + 1}/{candidate_count}")
+                candidates.append(
+                    _evaluate_candidate(
+                        candidate_index=candidate_index,
+                        restore_dir=restore_dir,
+                        decompression=decompression,
+                        compression=compression,
+                        artifact_path=artifact_path,
+                        verification_plan=plan,
+                        run_options=options,
+                        research_plan=research_plan,
+                        iteration_client=iteration_client,
+                        baseline=baseline,
                     )
-
-            effective_verification = repaired_verification or verification
-            success = _candidate_success(
-                baseline=baseline,
-                verification=effective_verification,
-                decompression=decompression,
-                verify=options.verify,
-            )
-            score = _candidate_score(
-                verification=effective_verification,
-                decompression=decompression,
-                verify=options.verify,
-            )
-            candidates.append(
-                CandidateResult(
-                    index=candidate_index,
-                    restore_dir=restore_dir,
-                    decompression=decompression,
-                    verification=verification,
-                    repair=repair,
-                    repaired_verification=repaired_verification,
-                    success=success,
-                    score=score,
                 )
+        else:
+            step("Compressing source files with this plan")
+            compression = Compressor(iteration_client).compress_repo(
+                prepared.source_root,
+                artifact_path,
+                options=CompressionOptions(
+                    max_llm_bytes=research_plan.max_llm_bytes,
+                    workers=options.workers,
+                    use_llm=bool(iteration_client and iteration_client.available),
+                    chunking_strategy=research_plan.chunking_strategy,
+                    chunk_size_lines=research_plan.chunk_size_lines,
+                    format_variant=research_plan.format_variant,
+                    compression_prompt_extra=research_plan.compression_prompt_extra,
+                ),
+                target_label=prepared.target,
             )
+            log_compression_summary(compression)
+
+            candidates = []
+            candidate_count = max(1, research_plan.candidate_count)
+            for candidate_index in range(candidate_count):
+                restore_dir = iteration_dir / f"candidate-{candidate_index}"
+                subsection(f"Candidate {candidate_index + 1}/{candidate_count}")
+                step("Decompressing artifact")
+                decompression = Decompressor(
+                    iteration_client,
+                    prompt_extra=research_plan.decompression_prompt_extra,
+                    candidate_index=candidate_index,
+                    candidate_count=candidate_count,
+                ).decompress_artifact(
+                    artifact_path,
+                    restore_dir,
+                    workers=options.workers,
+                    clean=True,
+                )
+                candidates.append(
+                    _evaluate_candidate(
+                        candidate_index=candidate_index,
+                        restore_dir=restore_dir,
+                        decompression=decompression,
+                        compression=compression,
+                        artifact_path=artifact_path,
+                        verification_plan=plan,
+                        run_options=options,
+                        research_plan=research_plan,
+                        iteration_client=iteration_client,
+                        baseline=baseline,
+                    )
+                )
 
         best = max(candidates, key=lambda candidate: candidate.score)
+        if best.success:
+            ok(f"Iteration {index + 1} succeeded with candidate {best.index + 1}.")
+        else:
+            fail(f"Iteration {index + 1} did not produce a verified candidate; best was candidate {best.index + 1}.")
+        detail("best score", f"{best.score:.3f}")
         iteration = IterationResult(
             index=index,
             artifact_path=artifact_path,
@@ -331,14 +336,25 @@ def run_target(
                 final_restored=final_restored,
             )
             _write_json(prepared.run_dir / "summary.json", result.to_json())
-            print(f"Success: {final_artifact}", flush=True)
+            section("Run result")
+            ok("Autoresearch succeeded.")
+            details(
+                (
+                    ("final artifact", final_artifact),
+                    ("final restored", final_restored),
+                    ("winning iter", index + 1),
+                    ("winning candidate", best.index + 1),
+                    ("run dir", prepared.run_dir),
+                )
+            )
             return result
 
         history.append(_history_entry(iteration))
-        if index + 1 >= max(1, options.max_iterations):
+        if index + 1 >= iteration_count:
             break
 
-        print("Iteration {index}: autoresearch LLM proposing next experiment".format(index=index), flush=True)
+        section("Autoresearch update")
+        step("Asking the research controller for the next experiment")
         research_plan = _enforce_research_plan_policy(
             research_agent.next_plan(
                 context=context,
@@ -347,7 +363,7 @@ def run_target(
             options,
         )
         _write_json(prepared.run_dir / f"research-plan-after-iter-{index}.json", research_plan.to_json())
-        print(f"  autoresearch: {research_plan.hypothesis}", flush=True)
+        log_research_plan(research_plan, title="next hypothesis")
 
     final_artifact = iterations[-1].artifact_path if iterations else None
     final_restored = iterations[-1].restore_dir if iterations else None
@@ -363,7 +379,288 @@ def run_target(
         stopped_reason="max iterations reached without a verified candidate",
     )
     _write_json(prepared.run_dir / "summary.json", result.to_json())
+    section("Run result")
+    fail("Autoresearch stopped without a verified candidate.")
+    details(
+        (
+            ("reason", result.stopped_reason),
+            ("final artifact", final_artifact),
+            ("final restored", final_restored),
+            ("run dir", prepared.run_dir),
+        )
+    )
     return result
+
+
+def _run_iteration_with_code_patch(
+    *,
+    prepared: PreparedTarget,
+    iteration_dir: Path,
+    artifact_path: Path,
+    research_plan: ResearchPlan,
+    options: RunOptions,
+) -> tuple[CompressionSummary, list[tuple[int, Path, DecompressionSummary]]]:
+    candidate_count = max(1, research_plan.candidate_count)
+    runner_log = iteration_dir / "code-patch-runner.log"
+    try:
+        patched_tool_dir = copy_tool_repo(iteration_dir / "patched-llm-compression")
+        apply_code_patch(patched_tool_dir, research_plan.code_patch)
+        detail("patched tool", patched_tool_dir)
+
+        config_path = iteration_dir / "code-patch-runner-input.json"
+        output_json = iteration_dir / "code-patch-runner-output.json"
+        _write_json(
+            config_path,
+            {
+                "source_root": str(prepared.source_root),
+                "artifact_path": str(artifact_path),
+                "iteration_dir": str(iteration_dir),
+                "target_label": prepared.target,
+                "workers": options.workers,
+                "research_plan": research_plan.to_json(),
+                "output_json": str(output_json),
+            },
+        )
+        env = os.environ.copy()
+        patched_src = str(patched_tool_dir / "src")
+        env["PYTHONPATH"] = patched_src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        timeout = max(3600, options.setup_timeout + options.timeout * candidate_count)
+        completed = subprocess.run(
+            [sys.executable, "-m", "llm_compress.iteration_runner", str(config_path)],
+            cwd=patched_tool_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        runner_log.write_text(completed.stdout or "", encoding="utf-8")
+        if completed.returncode != 0:
+            raise RuntimeError(f"patched iteration runner failed with exit {completed.returncode}; see {runner_log}")
+        data = json.loads(output_json.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise RuntimeError("patched iteration runner output was not a JSON object")
+        raw_compression = data.get("compression", {})
+        compression = _compression_from_json(raw_compression if isinstance(raw_compression, dict) else {})
+        raw_decompressions = data.get("decompressions", [])
+        if not isinstance(raw_decompressions, list):
+            raw_decompressions = []
+        decompressed_candidates: list[tuple[int, Path, DecompressionSummary]] = []
+        for item in raw_decompressions:
+            if not isinstance(item, dict):
+                continue
+            candidate_index = int(item.get("index", len(decompressed_candidates)))
+            restore_dir = Path(str(item.get("restore_dir") or iteration_dir / f"candidate-{candidate_index}"))
+            raw_decompression = item.get("decompression", {})
+            decompressed_candidates.append(
+                (
+                    candidate_index,
+                    restore_dir,
+                    _decompression_from_json(raw_decompression if isinstance(raw_decompression, dict) else {}),
+                )
+            )
+        if not decompressed_candidates:
+            raise RuntimeError("patched iteration runner returned no decompression candidates")
+        return compression, decompressed_candidates
+    except Exception as exc:  # noqa: BLE001 - failed code patches are research feedback.
+        fail(f"Temporary code patch failed: {exc}")
+        if runner_log.exists():
+            detail("runner log", runner_log)
+        return _failed_code_patch_iteration(prepared, iteration_dir, artifact_path, research_plan, str(exc))
+
+
+def _failed_code_patch_iteration(
+    prepared: PreparedTarget,
+    iteration_dir: Path,
+    artifact_path: Path,
+    research_plan: ResearchPlan,
+    error: str,
+) -> tuple[CompressionSummary, list[tuple[int, Path, DecompressionSummary]]]:
+    write_artifact(
+        artifact_path,
+        {
+            "target": prepared.target,
+            "strategy": "failed-temporary-code-patch",
+            "format_variant": research_plan.format_variant,
+            "chunking_strategy": research_plan.chunking_strategy,
+        },
+        [],
+    )
+    restore_dir = iteration_dir / "candidate-0"
+    restore_dir.mkdir(parents=True, exist_ok=True)
+    compression = CompressionSummary(
+        artifact_path=artifact_path,
+        original_bytes=_source_byte_count(prepared.source_root),
+        artifact_bytes=artifact_path.stat().st_size,
+        file_count=0,
+        llm_file_count=0,
+        lossless_file_count=0,
+        llm_paths=[],
+        fallback_paths=[],
+        errors={"__code_patch__": error},
+        chunking_strategy=research_plan.chunking_strategy,
+        format_variant=research_plan.format_variant,
+    )
+    decompression = DecompressionSummary(
+        artifact_path=artifact_path,
+        output_dir=restore_dir,
+        file_count=0,
+        llm_file_count=0,
+        lossless_file_count=0,
+        hash_matches=0,
+        hash_mismatches=[],
+        errors={"__code_patch__": error},
+    )
+    return compression, [(0, restore_dir, decompression)]
+
+
+def _compression_from_json(data: dict[str, Any]) -> CompressionSummary:
+    return CompressionSummary(
+        artifact_path=Path(str(data.get("artifact_path") or "compressed.jsonl")),
+        original_bytes=int(data.get("original_bytes") or 0),
+        artifact_bytes=int(data.get("artifact_bytes") or 0),
+        file_count=int(data.get("file_count") or 0),
+        llm_file_count=int(data.get("llm_file_count") or 0),
+        lossless_file_count=int(data.get("lossless_file_count") or 0),
+        llm_paths=[str(item) for item in data.get("llm_paths", []) if isinstance(item, str)],
+        fallback_paths=[str(item) for item in data.get("fallback_paths", []) if isinstance(item, str)],
+        errors=_string_dict(data.get("errors", {})),
+        chunking_strategy=str(data.get("chunking_strategy") or "file"),
+        format_variant=str(data.get("format_variant") or "component_v1"),
+    )
+
+
+def _decompression_from_json(data: dict[str, Any]) -> DecompressionSummary:
+    return DecompressionSummary(
+        artifact_path=Path(str(data.get("artifact_path") or "compressed.jsonl")),
+        output_dir=Path(str(data.get("output_dir") or "decompressed")),
+        file_count=int(data.get("file_count") or 0),
+        llm_file_count=int(data.get("llm_file_count") or 0),
+        lossless_file_count=int(data.get("lossless_file_count") or 0),
+        hash_matches=int(data.get("hash_matches") or 0),
+        hash_mismatches=[str(item) for item in data.get("hash_mismatches", []) if isinstance(item, str)],
+        errors=_string_dict(data.get("errors", {})),
+    )
+
+
+def _source_byte_count(root: Path) -> int:
+    total = 0
+    for path in iter_repo_paths(root):
+        if path.is_symlink():
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _string_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _evaluate_candidate(
+    *,
+    candidate_index: int,
+    restore_dir: Path,
+    decompression: DecompressionSummary,
+    compression: CompressionSummary,
+    artifact_path: Path,
+    verification_plan: VerificationPlan,
+    run_options: RunOptions,
+    research_plan: ResearchPlan,
+    iteration_client: OpenRouterClient | None,
+    baseline: VerificationReport | None,
+) -> CandidateResult:
+    log_decompression_summary(decompression)
+
+    verification: VerificationReport | None = None
+    if run_options.verify and not decompression.errors:
+        step("Running candidate verification")
+        verification = run_verification(
+            restore_dir,
+            verification_plan,
+            timeout=run_options.timeout,
+            setup_timeout=run_options.setup_timeout,
+            print_progress=True,
+        )
+        log_verification_report(verification, label=f"Candidate {candidate_index + 1} verification")
+    elif not run_options.verify:
+        warn("Verification skipped for this candidate.")
+    elif decompression.errors:
+        warn("Verification skipped because decompression failed.")
+
+    repair: RepairSummary | None = None
+    repaired_verification: VerificationReport | None = None
+    if (
+        run_options.verify
+        and research_plan.repair_enabled
+        and verification is not None
+        and not verification.ok
+        and not decompression.errors
+    ):
+        step("Verification failed; attempting LLM repair")
+        repair = repair_restored_candidate(
+            client=iteration_client,
+            artifact_path=artifact_path,
+            restore_dir=restore_dir,
+            verification=verification,
+            allowed_paths=compression.llm_paths,
+            prompt_extra=research_plan.decompression_prompt_extra,
+        )
+        if repair.repaired_paths:
+            ok(f"Repair changed {len(repair.repaired_paths)} file(s): {', '.join(repair.repaired_paths[:4])}")
+            step("Re-running verification after repair")
+            repaired_verification = run_verification(
+                restore_dir,
+                verification_plan,
+                timeout=run_options.timeout,
+                setup_timeout=run_options.setup_timeout,
+                print_progress=True,
+            )
+            log_verification_report(
+                repaired_verification,
+                label=f"Candidate {candidate_index + 1} repaired verification",
+            )
+        elif repair.error:
+            fail(f"Repair failed: {repair.error}")
+        elif repair.attempted:
+            warn(f"Repair made no changes. {repair.notes}".strip())
+        else:
+            warn(f"Repair skipped. {repair.notes}".strip())
+
+    effective_verification = repaired_verification or verification
+    success = _candidate_success(
+        baseline=baseline,
+        verification=effective_verification,
+        decompression=decompression,
+        verify=run_options.verify,
+    )
+    score = _candidate_score(
+        verification=effective_verification,
+        decompression=decompression,
+        verify=run_options.verify,
+    )
+    candidate_result = CandidateResult(
+        index=candidate_index,
+        restore_dir=restore_dir,
+        decompression=decompression,
+        verification=verification,
+        repair=repair,
+        repaired_verification=repaired_verification,
+        success=success,
+        score=score,
+    )
+    log_candidate_outcome(
+        index=candidate_index,
+        success=success,
+        score=score,
+        verification=effective_verification,
+        decompression=decompression,
+    )
+    return candidate_result
 
 
 def _candidate_success(
@@ -409,9 +706,12 @@ def _candidate_score(
 def _history_entry(iteration: IterationResult) -> dict[str, Any]:
     verification = iteration.verification
     failed_output = verification.all_output()[-12_000:] if verification else ""
+    plan_json = iteration.plan.to_json()
+    if len(str(plan_json.get("code_patch", ""))) > 12_000:
+        plan_json["code_patch"] = str(plan_json["code_patch"])[:12_000] + "\n... <truncated in history>"
     return {
         "iteration": iteration.index,
-        "plan": iteration.plan.to_json(),
+        "plan": plan_json,
         "success": iteration.success,
         "compression": iteration.compression.to_json(),
         "best_candidate": {
@@ -457,6 +757,7 @@ def _research_context(
         "allowed_models": model_candidates,
         "global_lessons": options.global_lessons,
         "global_seed_plan": options.initial_research_plan.to_json() if options.initial_research_plan else None,
+        "llm_compression_tool_repo": build_tool_repo_context(),
     }
 
 

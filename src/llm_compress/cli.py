@@ -8,9 +8,11 @@ from pathlib import Path
 
 from .app import DirectCompressionOptions, compress_target_once
 from .benchmarks import benchmark_table, run_benchmarks, summarize_benchmarks
+from .console import details, section, step, warn, yes_no
 from .decompressor import Decompressor
 from .openrouter import OpenRouterClient, OpenRouterConfig
 from .pipeline import RunOptions, run_target
+from .reporting import log_decompression_summary
 from .targets import resolve_artifact_reference
 
 FORMAT_VARIANTS = (
@@ -54,20 +56,32 @@ def _main_direct(argv: list[str]) -> int:
 
     client = OpenRouterClient(OpenRouterConfig.from_env(model=args.model))
     if not client.available:
-        print("OPENROUTER_API_KEY is not set; using lossless-only compression where possible.")
+        warn("OPENROUTER_API_KEY is not set; using lossless-only compression where possible.")
 
     if args.decompress:
         if not args.target:
             parser.error("target is required with -d/--decompress")
         artifact = resolve_artifact_reference(args.target)
         output = Path(args.output) if args.output else artifact.parent / "decompressed"
+        section("Decompression run")
+        details(
+            (
+                ("artifact", artifact),
+                ("output", output),
+                ("workers", args.workers),
+                ("LLM available", yes_no(client.available)),
+            )
+        )
+        step("Restoring artifact")
         summary = Decompressor(client).decompress_artifact(
             artifact,
             output,
             workers=args.workers,
             clean=True,
         )
-        print(json.dumps(summary.to_json(), indent=2, sort_keys=True))
+        log_decompression_summary(summary)
+        if args.json:
+            print(json.dumps(summary.to_json(), indent=2, sort_keys=True))
         return 0 if summary.ok else 1
 
     if not args.target:
@@ -87,7 +101,8 @@ def _main_direct(argv: list[str]) -> int:
             compression_prompt_extra=args.compression_prompt_extra or "",
         ),
     )
-    print(json.dumps(result.to_json(), indent=2, sort_keys=True))
+    if args.json:
+        print(json.dumps(result.to_json(), indent=2, sort_keys=True))
     return 0 if result.success else 1
 
 
@@ -103,7 +118,7 @@ def _main_autoresearch(argv: list[str]) -> int:
     research_model = args.research_model or os.environ.get("OPENROUTER_RESEARCH_MODEL", DEFAULT_RESEARCH_MODEL)
     research_client = OpenRouterClient(OpenRouterConfig.from_env(model=research_model))
     if not client.available:
-        print("OPENROUTER_API_KEY is not set; autoresearch will use deterministic fallbacks and lossless-only compression where needed.")
+        warn("OPENROUTER_API_KEY is not set; autoresearch will use deterministic fallbacks and lossless-only compression where needed.")
 
     options = RunOptions(
         runs_root=Path(args.work_dir),
@@ -123,14 +138,16 @@ def _main_autoresearch(argv: list[str]) -> int:
     if args.benchmarks:
         results = run_benchmarks(client=client, research_client=research_client, options=options, repo_workers=args.repo_workers)
         summary = summarize_benchmarks(results)
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
         return 0 if summary["success_count"] == summary["repo_count"] else 1
 
     if not args.target:
         parser.error("target is required unless --benchmarks or --list-benchmarks is used")
 
     result = run_target(args.target, client=client, research_client=research_client, options=options)
-    print(json.dumps(result.to_json(), indent=2, sort_keys=True))
+    if args.json:
+        print(json.dumps(result.to_json(), indent=2, sort_keys=True))
     return 0 if result.success else 1
 
 
@@ -161,6 +178,7 @@ def _build_direct_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunking-strategy", choices=CHUNKING_STRATEGIES, default="file")
     parser.add_argument("--chunk-size-lines", type=int, default=120)
     parser.add_argument("--compression-prompt-extra", default="")
+    parser.add_argument("--json", action="store_true", help="Print the full machine-readable JSON summary after human logs.")
     return parser
 
 
@@ -197,6 +215,7 @@ def _build_autoresearch_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Compress even if the original repo does not pass detected verification.",
     )
+    parser.add_argument("--json", action="store_true", help="Print the full machine-readable JSON summary after human logs.")
     return parser
 
 

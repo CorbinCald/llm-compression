@@ -15,6 +15,7 @@ class ResearchTests(unittest.TestCase):
                 "lossless_overrides": ["./ok.py", "../bad.py", "/bad.py"],
                 "max_llm_bytes": -1,
                 "temperature": 99,
+                "code_patch": "diff --git a/src/x.py b/src/x.py",
             },
             default_model="openrouter/auto",
             allowed_models=["openrouter/auto"],
@@ -29,6 +30,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(plan.lossless_overrides, [])
         self.assertEqual(plan.max_llm_bytes, 20_000)
         self.assertEqual(plan.temperature, 1.2)
+        self.assertEqual(plan.code_patch, "diff --git a/src/x.py b/src/x.py")
 
     def test_research_agent_fallback_without_client(self):
         agent = ResearchAgent(None, allowed_models=["openrouter/auto"], max_candidates=2)

@@ -11,23 +11,27 @@ from .openrouter import LLMError, OpenRouterClient
 DEFAULT_RESEARCH_PROGRAM = """# llm-compress autoresearch program
 
 You are the autonomous researcher for llm-compress. Your job is to propose the next
-compression experiment, not to write project code. The fixed loss metric is the
-restored project's own verification result: tests, lints, and builds that pass on
-the baseline should pass after decompression. Secondary objective: minimize artifact
-bytes/original bytes.
+compression experiment. You may also propose temporary changes to the llm-compression
+tool codebase when doing so would improve compression/decompression reliability. The
+fixed loss metric is the restored project's own verification result: tests, lints,
+and builds that pass on the baseline should pass after decompression. Secondary
+objective: minimize artifact bytes/original bytes.
 
 Honor the autoresearch loop: propose one experiment, let the harness execute it,
 inspect the metric and logs, then keep/discard/adjust in the next proposal.
 Change every relevant variable when evidence suggests it could help: prompt wording,
 model choice, chunking, compression format variant, decompression candidate count,
-and repair from failed tests. Do not use source-file lossless overrides; if an
-LLM-eligible source file fails verification, improve the compression/decompression
-strategy rather than preserving that file exactly.
+repair from failed tests, and temporary tool-code patches. Do not use source-file
+lossless overrides; if an LLM-eligible source file fails verification, improve the
+compression/decompression strategy or tool implementation rather than preserving that
+file exactly.
 """
 
 RESEARCH_SYSTEM_PROMPT = """You run an autonomous software compression research loop.
 
-You do not edit files directly. You output exactly one JSON object that describes the next experiment for the harness.
+You output exactly one JSON object that describes the next experiment for the harness.
+
+You may temporarily change the llm-compression tool itself by setting code_patch to a unified diff. The context includes a directory tree and selected source files from this repository. The harness applies that diff to an isolated copy of this repository for one experiment, uses the patched copy for compression/decompression, then discards it. The main harness still performs scoring and verification, so patches must genuinely improve restored code behavior rather than bypass verification.
 
 Core objective:
 - Primary metric: restored repo verification must match/pass baseline tests, lints, and builds.
@@ -45,6 +49,7 @@ You may adjust all experiment variables:
 - repair_enabled: whether failed candidates should be patched by an LLM using verification output.
 - max_llm_bytes: max source file bytes eligible for LLM compression; may be raised above the user default, but not lowered to avoid hard files.
 - temperature: OpenRouter sampling temperature for compression/decompression/repair.
+- code_patch: optional unified diff against this llm-compression repo. Use it to improve the compressor, decompressor, prompts, file classification, artifact handling, or other tool code when parameter tuning is not enough. Leave it empty when no tool-code change is needed.
 
 The lossless_overrides field is kept only for backward-compatible JSON output. It must be [];
 the harness ignores non-empty values from research plans.
@@ -62,7 +67,8 @@ Return only JSON with this schema:
   "repair_enabled": true,
   "lossless_overrides": [],
   "max_llm_bytes": 20000,
-  "temperature": 0.1
+  "temperature": 0.1,
+  "code_patch": ""
 }
 """
 
@@ -89,6 +95,7 @@ class ResearchPlan:
     lossless_overrides: list[str] = field(default_factory=list)
     max_llm_bytes: int = 20_000
     temperature: float = 0.1
+    code_patch: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -104,6 +111,7 @@ class ResearchPlan:
             "lossless_overrides": self.lossless_overrides,
             "max_llm_bytes": self.max_llm_bytes,
             "temperature": self.temperature,
+            "code_patch": self.code_patch,
         }
 
     @classmethod
@@ -145,6 +153,7 @@ class ResearchPlan:
             lossless_overrides=[],
             max_llm_bytes=max_llm_bytes,
             temperature=_clamp_float(data.get("temperature"), 0.0, 1.2, 0.1),
+            code_patch=_short_string(data.get("code_patch"), "", 80_000),
         )
 
 
@@ -211,7 +220,7 @@ class ResearchAgent:
             response = self.client.chat(
                 system=RESEARCH_SYSTEM_PROMPT,
                 user=user,
-                max_completion_tokens=2_500,
+                max_completion_tokens=8_000,
             )
             data = _extract_json_object(response)
             return ResearchPlan.from_json(

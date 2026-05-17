@@ -97,6 +97,8 @@ llm-compress -d https://github.com/pallets/itsdangerous.git -o restored-repo
 
 If `OPENROUTER_API_KEY` is absent, compression falls back to lossless-only artifacts. Those artifacts decompress without a key. Decompressing an artifact that already contains LLM components still requires `OPENROUTER_API_KEY`.
 
+Console output is human-readable by default; compression and autoresearch runs also write `summary.json` in the run directory. Add `--json` to print the full machine-readable summary to stdout.
+
 Useful normal-compression flags:
 
 ```bash
@@ -105,6 +107,7 @@ llm-compress ./repo --max-llm-bytes 40000
 llm-compress ./repo --no-llm
 llm-compress ./repo --format-variant component_literal_heavy
 llm-compress ./repo --chunking-strategy line_chunks --chunk-size-lines 80
+llm-compress ./repo --json
 ```
 
 Useful autoresearch flags:
@@ -120,6 +123,7 @@ llm-compress autoresearch ./repo --max-llm-bytes 40000
 llm-compress autoresearch ./repo --no-install       # skip auto dependency install
 llm-compress autoresearch ./repo --no-verify        # compress/decompress candidates only
 llm-compress autoresearch ./repo --continue-on-baseline-fail
+llm-compress autoresearch ./repo --json
 ```
 
 General model/iteration syntax:
@@ -177,7 +181,8 @@ For each target:
    - number of competing decompression candidates;
    - whether failed tests/lints/builds should drive LLM repair;
    - max bytes eligible for LLM compression, which autoresearch may raise but not lower below the CLI default;
-   - sampling temperature.
+   - sampling temperature;
+   - temporary `code_patch` unified diffs against the llm-compression tool codebase for isolated experiments.
 3. Compress the repo with that plan. Tests/config/locks/binaries and user-threshold oversized files remain deterministic lossless records, but autoresearch cannot add path-specific source-file lossless overrides.
 4. Decompress `candidate_count` restored repos. Each candidate is independently verified.
 5. If verification fails and `repair_enabled` is true, an LLM repair pass receives failed verification output, compressed components, and current reconstructed file content, writes full repaired files, and the candidate is reverified.
@@ -185,7 +190,7 @@ For each target:
 7. If no candidate passes, the research LLM receives the previous plan, compression stats, candidate scores, and failed output tails, then proposes the next experiment without opting source files out of compression.
 8. Repeat until success or `--max-iterations`.
 
-The primary loss metric is verification failure: tests/lints/builds that pass on baseline should pass after decompression. The secondary metric is compression ratio.
+The primary loss metric is verification failure: tests/lints/builds that pass on baseline should pass after decompression. The secondary metric is compression ratio. The research controller receives a directory tree and selected source files from this repository; when needed, it can include a `code_patch` unified diff. The patch is applied only to an isolated copy for that experiment's compression/decompression step and then discarded; the main harness still performs scoring and verification.
 
 ## Global benchmark learning
 
@@ -206,7 +211,7 @@ Global state is written to and automatically reloaded from:
 
 This makes benchmark lessons persist across separate `llm-compress autoresearch --benchmarks` invocations. A later benchmark run seeds the global strategy and per-repo researcher context with the previous run's lessons and recent repo history.
 
-Path-specific source-file `lossless_overrides` are disabled. Global learning carries general lessons via prompts, model choice, format variant, chunking, candidate count, repair behavior, size thresholds, and temperature.
+Path-specific source-file `lossless_overrides` are disabled. Global learning carries general lessons via prompts, model choice, format variant, chunking, candidate count, repair behavior, size thresholds, temperature, and optional temporary tool-code patches.
 
 ## Development validation
 

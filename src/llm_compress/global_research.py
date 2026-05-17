@@ -11,7 +11,9 @@ from .research import ResearchPlan
 
 GLOBAL_RESEARCH_SYSTEM_PROMPT = """You run global meta-research for llm-compress across a seven-repo benchmark suite.
 
-You do not edit files. You output exactly one JSON object that updates the global strategy for future repos.
+You output exactly one JSON object that updates the global strategy for future repos.
+
+Seed plans may include a temporary code_patch unified diff against the llm-compression tool repository. The context includes a directory tree and selected source files from this repository. The harness applies the patch to an isolated copy for an experiment, uses it for compression/decompression, then discards it. Use code patches when global evidence suggests the tool implementation itself should change, not to bypass verification.
 
 Goal:
 - Learn lessons from every completed repo and apply them to later repos.
@@ -21,7 +23,8 @@ Goal:
 
 You may update the global seed experiment plan for the next repo. This seed plan can tune:
 model, compression/decompression prompt addenda, format variant, chunking strategy, chunk size,
-candidate count, repair enablement, max LLM bytes, and temperature. max LLM bytes may be raised above the user default, but not lowered to avoid hard files.
+candidate count, repair enablement, max LLM bytes, temperature, and optional temporary code_patch.
+max LLM bytes may be raised above the user default, but not lowered to avoid hard files.
 
 Return only JSON with this schema:
 {
@@ -39,7 +42,8 @@ Return only JSON with this schema:
     "repair_enabled": true,
     "lossless_overrides": [],
     "max_llm_bytes": 20000,
-    "temperature": 0.1
+    "temperature": 0.1,
+    "code_patch": ""
   }
 }
 """
@@ -149,14 +153,14 @@ class GlobalResearchAgent:
             "allowed_models": self.allowed_models,
             "suite_context": suite_context,
             "previous_global_state": previous_state.to_json() if previous_state else None,
-            "completed_repo_history": history[-10:],
+            "completed_repo_history": _history_for_prompt(history[-10:]),
             "fallback_if_uncertain": fallback.to_json(),
         }
         try:
             response = self.client.chat(
                 system=GLOBAL_RESEARCH_SYSTEM_PROMPT,
                 user=json.dumps(payload, indent=2, sort_keys=True),
-                max_completion_tokens=3_000,
+                max_completion_tokens=8_000,
             )
             data = _extract_json_object(response)
             return _state_from_json(
@@ -225,6 +229,19 @@ class GlobalResearchAgent:
             lessons=_dedupe_tail(lessons, 12),
             seed_plan=seed,
         )
+
+
+def _history_for_prompt(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for entry in history:
+        cloned = dict(entry)
+        plan = cloned.get("final_plan")
+        if isinstance(plan, dict) and len(str(plan.get("code_patch", ""))) > 12_000:
+            plan = dict(plan)
+            plan["code_patch"] = str(plan["code_patch"])[:12_000] + "\n... <truncated in global prompt>"
+            cloned["final_plan"] = plan
+        result.append(cloned)
+    return result
 
 
 def _state_from_json(

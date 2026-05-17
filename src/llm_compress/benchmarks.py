@@ -6,9 +6,12 @@ from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
+from .console import detail, details, fail, ok, section, warn
 from .global_research import GlobalResearchAgent, GlobalResearchState, load_global_research_file
 from .openrouter import OpenRouterClient
 from .pipeline import PipelineResult, RunOptions, run_target
+from .reporting import log_research_plan
+from .tool_patch import build_tool_repo_context
 
 
 @dataclass(frozen=True)
@@ -111,8 +114,18 @@ def run_benchmarks(
 ) -> BenchmarkSuiteResult:
     # Global benchmark learning is inherently sequential: repo N's outcome seeds repo N+1.
     if repo_workers != 1:
-        print("Global benchmark learning runs repos sequentially; --repo-workers is ignored.", flush=True)
+        warn("Global benchmark learning runs repos sequentially; --repo-workers is ignored.")
     options.runs_root = Path(options.runs_root)
+    section("Global benchmark suite")
+    details(
+        (
+            ("repos", len(BUILTIN_BENCHMARKS)),
+            ("iterations/repo", options.max_iterations),
+            ("max candidates", options.max_candidates),
+            ("runs root", options.runs_root),
+            ("verification", "yes" if options.verify else "no"),
+        )
+    )
     suite_context = _suite_context(options)
     model_candidates = _model_candidates(client, options.model_candidates)
     global_agent = GlobalResearchAgent(
@@ -134,11 +147,8 @@ def run_benchmarks(
             previous_state=persisted_state,
             default_max_llm_bytes=options.max_llm_bytes,
         )
-        print(
-            f"Loaded persisted global research: lessons={len(global_state.lessons)} "
-            f"history={len(global_history)}",
-            flush=True,
-        )
+        ok("Loaded persisted global research state.")
+        details((("lessons", len(global_state.lessons)), ("history", len(global_history))))
     else:
         global_state = global_agent.initial_state(
             suite_context=suite_context,
@@ -148,13 +158,22 @@ def run_benchmarks(
     results: list[PipelineResult] = []
     failures: list[BenchmarkFailure] = []
     _write_global_state(options.runs_root, "initial", global_state, global_history)
+    section("Global seed strategy")
+    detail("reason", global_state.reason)
+    detail("lessons", len(global_state.lessons))
+    log_research_plan(global_state.seed_plan, title="seed hypothesis")
 
     for index, repo in enumerate(BUILTIN_BENCHMARKS):
-        print(
-            f"Global benchmark {index + 1}/{len(BUILTIN_BENCHMARKS)}: {repo.name} "
-            f"using seed {global_state.seed_plan.format_variant}/{global_state.seed_plan.chunking_strategy}",
-            flush=True,
+        section(f"Benchmark repo {index + 1}/{len(BUILTIN_BENCHMARKS)}: {repo.name}")
+        details(
+            (
+                ("url", repo.url),
+                ("language", repo.language),
+                ("size", repo.size),
+                ("why", repo.reason),
+            )
         )
+        log_research_plan(global_state.seed_plan, title="seed hypothesis")
         repo_options = dataclass_replace(
             options,
             initial_research_plan=global_state.seed_plan,
@@ -173,7 +192,7 @@ def run_benchmarks(
                 "error": str(exc),
                 "global_seed_plan": global_state.seed_plan.to_json(),
             }
-            print(f"Benchmark {repo.name} failed before summary: {exc}", flush=True)
+            fail(f"Benchmark {repo.name} failed before summary: {exc}")
 
         global_history.append(repo_summary)
         global_state = global_agent.update_state(
@@ -183,11 +202,18 @@ def run_benchmarks(
             default_max_llm_bytes=options.max_llm_bytes,
         )
         _write_global_state(options.runs_root, f"after-{repo.name}", global_state, global_history)
-        print(
-            f"  global lessons={len(global_state.lessons)} next_seed="
-            f"{global_state.seed_plan.format_variant}/{global_state.seed_plan.chunking_strategy}",
-            flush=True,
+        if repo_summary.get("success"):
+            ok(f"Benchmark {repo.name} passed.")
+        else:
+            fail(f"Benchmark {repo.name} did not pass.")
+        details(
+            (
+                ("ratio", repo_summary.get("ratio")),
+                ("checks", f"{repo_summary.get('check_pass_count', 0)}/{repo_summary.get('check_count', 0)}"),
+                ("lessons", len(global_state.lessons)),
+            )
         )
+        log_research_plan(global_state.seed_plan, title="next seed")
 
     return BenchmarkSuiteResult(
         results=results,
@@ -280,6 +306,7 @@ def _suite_context(options: RunOptions) -> dict[str, Any]:
         "max_candidates": options.max_candidates,
         "default_max_llm_bytes": options.max_llm_bytes,
         "verify": options.verify,
+        "llm_compression_tool_repo": build_tool_repo_context(),
     }
 
 

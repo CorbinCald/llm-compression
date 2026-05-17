@@ -190,7 +190,7 @@ For each target:
 7. If no raw candidate passes, the research LLM receives the previous plan, compression stats, raw candidate scores, failed output tails, and repair diagnostics such as changed paths and repaired reverification results, then proposes the next experiment without opting source files out of compression.
 8. Repeat until success or `--max-iterations`.
 
-The primary loss metric is raw-decompression verification failure: tests/lints/builds that pass on baseline should pass after decompression before any repair. The secondary metric is compression ratio. The research controller receives a directory tree and selected source files from this repository; when needed, it can include a `code_patch` unified diff. The patch is applied only to an isolated copy for that experiment's compression/decompression step and then discarded; the main harness still performs scoring and verification.
+The primary loss metric is raw-decompression verification failure, scored as granular failed test count when the tool output exposes it and otherwise as fallback failure units for failed setup/lint/build/test commands. Tests/lints/builds that pass on baseline should pass after decompression before any repair. The secondary metric is compression ratio. The research controller receives a directory tree and selected source files from this repository; when needed, it can include a `code_patch` unified diff. The patch is applied only to an isolated copy for that experiment's compression/decompression step and then discarded; the main harness still performs scoring and verification.
 
 ## Global benchmark learning
 

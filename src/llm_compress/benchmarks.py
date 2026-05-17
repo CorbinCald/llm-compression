@@ -249,6 +249,8 @@ def summarize_benchmarks(results: BenchmarkSuiteResult | list[PipelineResult]) -
                 "llm_files": final_iteration.compression.llm_file_count if final_iteration else 0,
                 "lossless_files": final_iteration.compression.lossless_file_count if final_iteration else 0,
                 "final_plan": final_iteration.plan.to_json() if final_iteration else None,
+                "failed_test_count": final_iteration.verification.failed_test_count if final_iteration and final_iteration.verification else 0,
+                "failure_units": final_iteration.verification.failure_units if final_iteration and final_iteration.verification else 0,
                 "stopped_reason": result.stopped_reason,
             }
         )
@@ -293,6 +295,9 @@ def _repo_result_summary(repo: BenchmarkRepo, result: PipelineResult) -> dict[st
                     "repaired_verification_ok": repaired.ok if repaired else None,
                     "repaired_check_pass_count": repaired.check_pass_count if repaired else 0,
                     "repaired_check_count": repaired.check_count if repaired else 0,
+                    "repaired_failed_test_count": repaired.failed_test_count if repaired else 0,
+                    "repaired_total_test_count": repaired.total_test_count if repaired else None,
+                    "repaired_failure_units": repaired.failure_units if repaired else 0,
                     "accepted": candidate.success,
                     "note": "repair is diagnostic only; accepted requires raw decompression verification",
                 }
@@ -310,6 +315,9 @@ def _repo_result_summary(repo: BenchmarkRepo, result: PipelineResult) -> dict[st
         "verification_ok": verification.ok if verification else None,
         "check_pass_count": verification.check_pass_count if verification else 0,
         "check_count": verification.check_count if verification else 0,
+        "failed_test_count": verification.failed_test_count if verification else 0,
+        "total_test_count": verification.total_test_count if verification else None,
+        "failure_units": verification.failure_units if verification else 0,
         "failed_output_tail": failed_output,
         "repair_diagnostics": repair_diagnostics,
         "stopped_reason": result.stopped_reason,

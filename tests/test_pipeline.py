@@ -144,6 +144,7 @@ class PipelineRepairTests(unittest.TestCase):
             history = _history_entry(iteration)
 
         self.assertEqual(history["best_candidate"]["verification_ok"], False)
+        self.assertEqual(history["best_candidate"]["failure_units"], 1)
         self.assertEqual(history["repair_diagnostics"][0]["repair"]["repaired_paths"], ["./a.py"])
         self.assertEqual(history["repair_diagnostics"][0]["repaired_verification_ok"], True)
         self.assertFalse(history["repair_diagnostics"][0]["accepted"])

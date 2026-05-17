@@ -108,10 +108,18 @@ def log_verification_plan(plan: Any) -> None:
 
 
 def log_verification_report(report: Any, *, label: str = "Verification", include_output: bool = False) -> None:
+    test_text = ""
+    if getattr(report, "total_test_count", None) is not None:
+        test_text = f", {report.failed_test_count}/{report.total_test_count} tests failed"
+    elif getattr(report, "failed_test_count", 0):
+        test_text = f", {report.failed_test_count} tests failed"
     if report.ok:
-        ok(f"{label} passed ({report.check_pass_count}/{report.check_count} checks).")
+        ok(f"{label} passed ({report.check_pass_count}/{report.check_count} checks{test_text}).")
     else:
-        fail(f"{label} failed ({report.check_pass_count}/{report.check_count} checks passed).")
+        fail(
+            f"{label} failed ({report.check_pass_count}/{report.check_count} checks passed, "
+            f"failure units={report.failure_units}{test_text})."
+        )
     failed_results = [result for result in report.setup_results + report.check_results if not result.ok]
     if not failed_results:
         return
@@ -136,4 +144,6 @@ def log_candidate_outcome(*, index: int, success: bool, score: float, verificati
         detail("decomp errors", len(decompression.errors))
     if verification is not None:
         detail("checks", f"{verification.check_pass_count}/{verification.check_count}")
+        detail("failed tests", verification.failed_test_count)
+        detail("failure units", verification.failure_units)
         detail("verification", "pass" if verification.ok else "fail")

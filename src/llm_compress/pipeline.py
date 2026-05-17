@@ -705,6 +705,7 @@ def _candidate_score(
         return score - 1.0
     if verification.check_count:
         score += verification.check_pass_count / verification.check_count
+    score -= verification.failure_units
     if verification.ok:
         score += 2.0
     return score
@@ -728,6 +729,9 @@ def _history_entry(iteration: IterationResult) -> dict[str, Any]:
             "verification_ok": verification.ok if verification else None,
             "check_pass_count": verification.check_pass_count if verification else 0,
             "check_count": verification.check_count if verification else 0,
+            "failed_test_count": verification.failed_test_count if verification else 0,
+            "total_test_count": verification.total_test_count if verification else None,
+            "failure_units": verification.failure_units if verification else 0,
             "failed_output_tail": failed_output,
         },
         "candidate_count": len(iteration.candidates),
@@ -748,6 +752,9 @@ def _repair_diagnostics_for_history(candidates: list[CandidateResult]) -> list[d
                 "repaired_verification_ok": repaired.ok if repaired else None,
                 "repaired_check_pass_count": repaired.check_pass_count if repaired else 0,
                 "repaired_check_count": repaired.check_count if repaired else 0,
+                "repaired_failed_test_count": repaired.failed_test_count if repaired else 0,
+                "repaired_total_test_count": repaired.total_test_count if repaired else None,
+                "repaired_failure_units": repaired.failure_units if repaired else 0,
                 "repaired_failed_output_tail": repaired.all_output()[-4_000:] if repaired and not repaired.ok else "",
                 "accepted": candidate.success,
                 "note": "repair is diagnostic only; accepted requires raw decompression verification",

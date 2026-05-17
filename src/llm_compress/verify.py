@@ -34,10 +34,20 @@ class CommandResult:
     seconds: float
     output: str
     timed_out: bool = False
+    failed_test_count: int | None = None
+    total_test_count: int | None = None
 
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and not self.timed_out
+
+    @property
+    def failure_units(self) -> int:
+        if self.failed_test_count is not None:
+            if self.failed_test_count > 0 or self.ok:
+                return self.failed_test_count
+            return 1
+        return 0 if self.ok else 1
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -48,6 +58,9 @@ class CommandResult:
             "seconds": round(self.seconds, 3),
             "timed_out": self.timed_out,
             "ok": self.ok,
+            "failed_test_count": self.failed_test_count,
+            "total_test_count": self.total_test_count,
+            "failure_units": self.failure_units,
             "output": self.output[-12_000:],
         }
 
@@ -83,6 +96,19 @@ class VerificationReport:
     def check_count(self) -> int:
         return len(self.check_results)
 
+    @property
+    def failed_test_count(self) -> int:
+        return sum(result.failed_test_count or 0 for result in self.check_results)
+
+    @property
+    def total_test_count(self) -> int | None:
+        totals = [result.total_test_count for result in self.check_results if result.total_test_count is not None]
+        return sum(totals) if totals else None
+
+    @property
+    def failure_units(self) -> int:
+        return sum(result.failure_units for result in self.setup_results + self.check_results)
+
     def all_output(self) -> str:
         return "\n".join(result.output for result in self.setup_results + self.check_results)
 
@@ -92,6 +118,9 @@ class VerificationReport:
             "ok": self.ok,
             "check_pass_count": self.check_pass_count,
             "check_count": self.check_count,
+            "failed_test_count": self.failed_test_count,
+            "total_test_count": self.total_test_count,
+            "failure_units": self.failure_units,
             "plan": self.plan.to_json(),
             "setup_results": [result.to_json() for result in self.setup_results],
             "check_results": [result.to_json() for result in self.check_results],
@@ -290,6 +319,7 @@ def run_command(root: Path, command: VerificationCommand, *, default_timeout: in
         output = stdout + stderr
         returncode = 124
         timed_out = True
+    failed_tests, total_tests = _test_counts_from_output(command, output, returncode=returncode, timed_out=timed_out)
     return CommandResult(
         name=command.name,
         command=command.command,
@@ -298,6 +328,8 @@ def run_command(root: Path, command: VerificationCommand, *, default_timeout: in
         seconds=time.time() - start,
         output=output[-50_000:],
         timed_out=timed_out,
+        failed_test_count=failed_tests,
+        total_test_count=total_tests,
     )
 
 
@@ -467,6 +499,113 @@ def _command_available(command: str, *, cwd: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return completed.returncode == 0
+
+
+def _test_counts_from_output(
+    command: VerificationCommand,
+    output: str,
+    *,
+    returncode: int,
+    timed_out: bool,
+) -> tuple[int | None, int | None]:
+    if not _is_test_command(command):
+        return None, None
+
+    failed, total = _parse_test_summary_counts(output)
+    if failed is None:
+        failed = 0 if returncode == 0 and not timed_out else 1
+    return failed, total
+
+
+def _is_test_command(command: VerificationCommand) -> bool:
+    text = f"{command.name} {command.command}".lower()
+    return "test" in text or "pytest" in text or "cargo test" in text or "go test" in text
+
+
+def _parse_test_summary_counts(output: str) -> tuple[int | None, int | None]:
+    text = output.replace("\r", "")
+    lower = text.lower()
+
+    # pytest/unittest: "2 failed, 3 passed ..." or "FAILED (failures=2, errors=1)".
+    unittest_match = re.search(r"failed \(([^)]*)\)", lower)
+    if unittest_match:
+        details = unittest_match.group(1)
+        failures = _named_count(details, "failures") + _named_count(details, "errors")
+        ran = re.search(r"ran (\d+) tests?", lower)
+        return failures, int(ran.group(1)) if ran else None
+
+    # Go test does not print a final granular count; count failed test headings.
+    go_failures = re.findall(r"(?m)^--- fail: ", lower)
+    if go_failures:
+        return len(go_failures), None
+
+    # Rust cargo can print one result line per test binary; sum all of them.
+    rust_failures = 0
+    rust_total = 0
+    rust_seen = False
+    for line in lower.splitlines():
+        if "test result:" not in line:
+            continue
+        counts = _counts_from_summary_line(line)
+        if counts:
+            rust_seen = True
+            rust_failures += counts[0]
+            rust_total += counts[1] or 0
+    if rust_seen:
+        return rust_failures, rust_total or None
+
+    # Jest: "Tests: 2 failed, 3 passed, 5 total".
+    for line in reversed(lower.splitlines()[-80:]):
+        if "tests:" in line:
+            counts = _counts_from_summary_line(line)
+            if counts:
+                return counts
+
+    # Generic summaries from pytest/vitest/mocha and similar tools.
+    for line in reversed(lower.splitlines()[-80:]):
+        if not any(word in line for word in ("failed", "failure", "failing", "error")):
+            continue
+        if not any(word in line for word in ("passed", "passing", "total", "test", "tests")):
+            continue
+        counts = _counts_from_summary_line(line)
+        if counts:
+            return counts
+
+    return None, None
+
+
+def _counts_from_summary_line(line: str) -> tuple[int, int | None] | None:
+    counts: dict[str, int] = {}
+    labels = "failed|failing|failures|failure|errors|error|passed|passing|skipped|ignored|pending|total|tests|test"
+    for match in re.finditer(rf"(\d+)\s+({labels})\b", line):
+        label = match.group(2)
+        counts[label] = counts.get(label, 0) + int(match.group(1))
+
+    failed = 0
+    seen_failure_label = False
+    for label, value in counts.items():
+        if label in {"failed", "failing", "failures", "failure", "errors", "error"}:
+            failed += value
+            seen_failure_label = True
+    if not seen_failure_label:
+        return None
+
+    total = None
+    for label, value in counts.items():
+        if label in {"total", "tests", "test"}:
+            total = value
+            break
+    if total is None:
+        passed = sum(counts.get(label, 0) for label in ("passed", "passing"))
+        skipped = sum(counts.get(label, 0) for label in ("skipped", "ignored", "pending"))
+        if passed or skipped or failed:
+            total = passed + skipped + failed
+    return failed, total
+
+
+def _named_count(text: str, name: str) -> int:
+    match = re.search(rf"{re.escape(name)}=(\d+)", text)
+    return int(match.group(1)) if match else 0
 
 
 def _to_text(value: str | bytes | None) -> str:

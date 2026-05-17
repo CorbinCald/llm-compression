@@ -17,7 +17,7 @@ Seed plans may include a temporary code_patch unified diff against the llm-compr
 
 Goal:
 - Learn lessons from every completed repo and apply them to later repos.
-- Primary metric: each restored repo must pass the baseline tests/lints/builds.
+- Primary metric: minimize raw-decompression failure_units before repair. failure_units use granular failed test counts when verification output exposes them, and fallback command-level units for failed setup/lint/build/test commands otherwise.
 - Secondary metric: lower artifact_bytes/original_bytes is better.
 - Prefer lessons that generalize across languages/repos; source-file lossless overrides are banned.
 

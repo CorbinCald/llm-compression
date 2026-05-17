@@ -6,10 +6,45 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from llm_compress.verify import VerificationCommand, VerificationPlan, discover_verification_plan, run_verification
+from llm_compress.verify import (
+    CommandResult,
+    VerificationCommand,
+    VerificationPlan,
+    _parse_test_summary_counts,
+    discover_verification_plan,
+    run_verification,
+)
 
 
 class VerificationDiscoveryTests(unittest.TestCase):
+    def test_parses_pytest_granular_failure_count(self):
+        failed, total = _parse_test_summary_counts("=== 2 failed, 3 passed, 1 skipped in 0.12s ===")
+        self.assertEqual(failed, 2)
+        self.assertEqual(total, 6)
+
+    def test_parses_jest_granular_failure_count(self):
+        failed, total = _parse_test_summary_counts("Tests:       4 failed, 10 passed, 14 total")
+        self.assertEqual(failed, 4)
+        self.assertEqual(total, 14)
+
+    def test_parses_unittest_failures_and_errors(self):
+        output = "Ran 9 tests in 0.1s\n\nFAILED (failures=2, errors=1)"
+        failed, total = _parse_test_summary_counts(output)
+        self.assertEqual(failed, 3)
+        self.assertEqual(total, 9)
+
+    def test_failed_test_command_with_zero_parsed_failures_has_fallback_unit(self):
+        result = CommandResult(
+            name="python-test",
+            command="pytest",
+            kind="check",
+            returncode=1,
+            seconds=0.01,
+            output="0 failed",
+            failed_test_count=0,
+        )
+        self.assertEqual(result.failure_units, 1)
+
     def test_discovers_node_scripts(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -36,7 +36,7 @@ You output exactly one JSON object that describes the next experiment for the ha
 You may temporarily change the llm-compression tool itself by setting code_patch to a unified diff. The context includes a directory tree and selected source files from this repository. The harness applies that diff to an isolated copy of this repository for one experiment, uses the patched copy for compression/decompression, then discards it. The main harness still performs scoring and verification, so patches must genuinely improve restored code behavior rather than bypass verification.
 
 Core objective:
-- Primary metric: raw decompressed repo verification must match/pass baseline tests, lints, and builds before any repair.
+- Primary metric: minimize raw-decompression failure_units before any repair. failure_units use granular failed test counts when verification output exposes them, and fallback command-level units for failed setup/lint/build/test commands otherwise.
 - Secondary metric: lower artifact_bytes/original_bytes is better.
 - Prefer the most compressed verified strategy; do not mark LLM-eligible source files lossless.
 - Diagnostic repair may run after failure, but repaired candidates are not accepted; use repair diagnostics to improve the next fresh decompression.

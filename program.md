@@ -8,7 +8,7 @@ You may also propose temporary changes to the llm-compression tool codebase itse
 
 ## Fixed metric
 
-Primary loss: restored project tests/lints/builds fail that passed on the baseline.
+Primary loss: minimize raw-decompression `failure_units`, using granular failed test counts when verification output exposes them and fallback units for failed setup/lint/build/test commands otherwise.
 Secondary loss: `artifact_bytes / original_bytes`.
 
 A candidate is accepted only when the raw decompressed restored repo verifies successfully before any repair. Diagnostic repair may patch and reverify a failed candidate, but that repaired tree is feedback for the next experiment, not success. If multiple raw candidates pass, prefer the one produced by the more compressed artifact. Do not mark LLM-eligible source files for exact preservation.
